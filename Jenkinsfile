@@ -49,7 +49,7 @@ pipeline {
 
         // DefectDojo
         DEFECTDOJO_URL           = 'https://defectdojo.devops.softnethq.co.tz'
-        DEFECTDOJO_ENGAGEMENT_ID = '21'
+        DEFECTDOJO_ENGAGEMENT_ID = '20'
 
         // Dependency-Track — SBOM upload
         DEPENDENCY_TRACK_URL = 'https://dependencytrack.devops.softnethq.co.tz'
