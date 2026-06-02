@@ -36,7 +36,7 @@ pipeline {
         BRANCH_NAME        = 'main'
 
         // K8s manifest repo
-        K8S_MANIFEST_REPO_URL       = 'http://192.168.15.85/devsecops1/k8s-dashboard.git'
+        K8S_MANIFEST_REPO_URL       = 'http://192.168.15.85/kubernetes-manifest/k8s-dashboard-manifest.git'
         K8S_MANIFEST_CREDENTIALS_ID = 'lsaid'
         K8S_MANIFEST_BRANCH         = 'main'
         K8S_MANIFEST_PATHS          = 'k8s/02-deployment.yaml'
