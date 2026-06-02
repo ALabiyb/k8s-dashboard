@@ -95,7 +95,7 @@ pipeline {
 
         stage('Build Artifact') {
             steps {
-                script { buildArtifact() }
+                script { buildArtifact(command: 'go build -o app ./cmd/server') }
             }
         }
 
