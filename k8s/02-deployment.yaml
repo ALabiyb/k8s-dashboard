@@ -21,22 +21,26 @@ spec:
 
       containers:
         - name: dashboard
-          image: yourregistry/k8s-dashboard:latest  # replace with your image
+          image: yourregistry/k8s-dashboard:1.0.0
           ports:
             - containerPort: 8080
           args:
-            - "-config=/etc/dashboard/config.yaml"  # point to mounted config
+            - "-config=/etc/dashboard/config.yaml"
           env:
             - name: MOCK_MODE
-              value: "false"  # disable mock mode to use real cluster data
+              value: "false"
 
-          # Mount the ConfigMap as a file at /etc/dashboard/config.yaml
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            privileged: false
+
           volumeMounts:
             - name: config
               mountPath: /etc/dashboard
               readOnly: true
 
-          # Resource limits — this app is very lightweight
           resources:
             requests:
               cpu: "50m"
