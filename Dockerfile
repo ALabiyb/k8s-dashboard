@@ -17,11 +17,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o k8s-dashboard ./cmd/server
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────
 FROM alpine:3.19
 
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
 WORKDIR /app
 
 COPY --from=builder /app/k8s-dashboard .
 COPY --from=builder /app/config/config.yaml ./config/config.yaml
 COPY --from=builder /app/web/ ./web/
+
+RUN chown -R appuser:appgroup /app
+
+USER appuser
 
 EXPOSE 8080
 
