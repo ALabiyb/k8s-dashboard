@@ -1,0 +1,38 @@
+# ── ConfigMap ─────────────────────────────────────────────────────────────
+# Mounts config.yaml into the pod. Edit this instead of the Docker image
+# when you want to change thresholds or SMTP settings without rebuilding.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-config
+  namespace: k8s-dashboard
+  labels:
+    app: k8s-dashboard
+    app.kubernetes.io/part-of: k8s-dashboard
+data:
+  config.yaml: |
+    server:
+      port: 8081
+      poll_interval: 30s
+
+    excluded_namespaces:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - k8s-dashboard
+
+    thresholds:
+      healthy: 100
+      degraded: 70
+
+    notifications:
+      email:
+        enabled: true
+        smtp_host: "smtp.gmail.com"
+        smtp_port: 587
+        smtp_username: "you@gmail.com"
+        smtp_password: "your-app-password"
+        from: "k8s-dashboard@yourorg.com"
+        to:
+          - "team@yourorg.com"
+        on_state_change_only: true

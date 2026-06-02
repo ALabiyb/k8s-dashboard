@@ -1,0 +1,14 @@
+# Exclude the stray folder created by a tooling bug
+{cmd
+{cmd/server,internal/
+
+# Exclude local dev artifacts
+*.exe
+*.test
+*.out
+
+# Exclude k8s manifests (not needed inside the container)
+k8s/
+
+# Exclude docs
+README.md

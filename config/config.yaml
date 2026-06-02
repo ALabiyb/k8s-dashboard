@@ -1,0 +1,37 @@
+# ──────────────────────────────────────────────
+# k8s-dashboard configuration
+# Edit this file to change thresholds, SMTP, etc.
+# ──────────────────────────────────────────────
+
+server:
+  port: 8081          # Port the dashboard web server listens on
+  poll_interval: 30s  # How often to re-check all namespaces
+
+# Namespaces to SKIP (system namespaces you don't want shown)
+excluded_namespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - k8s-dashboard      # exclude our own namespace
+
+# Health score thresholds (percentage of healthy services)
+thresholds:
+  healthy: 100    # 100%        → green
+  degraded: 70    # 70–99%      → amber/yellow
+                  # below 70%   → red/critical
+
+# Email notification settings
+notifications:
+  email:
+    enabled: true
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_username: "you@gmail.com"
+    smtp_password: "your-app-password"   # use an app password, not your real password
+    from: "k8s-dashboard@yourorg.com"
+    to:
+      - "team@yourorg.com"
+      - "oncall@yourorg.com"
+    # Only send email when health STATE changes (green→amber, amber→red, etc.)
+    # This prevents spam on every poll cycle
+    on_state_change_only: true

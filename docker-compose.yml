@@ -1,0 +1,60 @@
+# ── docker-compose.yml ────────────────────────────────────────────────────
+#
+# Three ways to run:
+#
+#   1. Mock mode (no k8s needed — fake data, perfect for UI testing):
+#      docker compose up
+#
+#   2. Real mode with your local kubeconfig:
+#      docker compose --profile real up
+#
+#   3. Override credentials (recommended before exposing externally):
+#      ADMIN_PASS=mysecret VIEWER_PASS=readonly docker compose up
+#
+# Auth defaults (change before production!):
+#   admin  / admin   → full access  (set ADMIN_PASS  to override)
+#   viewer / viewer  → read-only    (set VIEWER_PASS to override)
+
+services:
+
+  # ── Mock mode (default) ─────────────────────────────────────────────────
+  # Runs with fake data — no cluster needed.
+  # Visit http://localhost:8080 after: docker compose up
+  dashboard-mock:
+    build: .
+    ports:
+      - "8080:8081"          # host:container — config.yaml uses 8081 internally
+    environment:
+      - MOCK_MODE=true
+
+      # ── Auth credentials (override these!) ──────────────────────────────
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-admin}
+      - VIEWER_USER=${VIEWER_USER:-viewer}
+      - VIEWER_PASS=${VIEWER_PASS:-viewer}
+      # Leave blank to auto-generate (sessions won't survive container restart)
+      - DASHBOARD_SECRET=${DASHBOARD_SECRET:-}
+    profiles:
+      - ""                   # default profile — runs with plain: docker compose up
+      - mock
+
+  # ── Real mode with local kubeconfig ─────────────────────────────────────
+  # Run with: docker compose --profile real up
+  dashboard-real:
+    build: .
+    ports:
+      - "8080:8081"
+    environment:
+      - MOCK_MODE=false
+      - KUBECONFIG=/root/.kube/config
+
+      # ── Auth credentials (override these!) ──────────────────────────────
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-admin}
+      - VIEWER_USER=${VIEWER_USER:-viewer}
+      - VIEWER_PASS=${VIEWER_PASS:-viewer}
+      - DASHBOARD_SECRET=${DASHBOARD_SECRET:-}
+    volumes:
+      - ~/.kube/config:/root/.kube/config:ro
+    profiles:
+      - real

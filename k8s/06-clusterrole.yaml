@@ -1,0 +1,22 @@
+# ── ClusterRole ───────────────────────────────────────────────────────────
+# Grants READ-ONLY access to the resources the collector needs.
+# We do NOT grant write permissions — this dashboard only reads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8s-dashboard-reader
+rules:
+  # List and watch all namespaces so we can discover products dynamically
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+
+  # Read deployments and statefulsets to check replica health
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+
+  # Read pods to detect CrashLoopBackOff and OOMKilled at pod level
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]

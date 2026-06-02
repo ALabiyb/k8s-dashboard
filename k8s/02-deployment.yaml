@@ -1,0 +1,56 @@
+# ── Deployment ────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-dashboard
+  namespace: k8s-dashboard
+  labels:
+    app: k8s-dashboard
+    app.kubernetes.io/part-of: k8s-dashboard
+spec:
+  replicas: 1   # only one replica needed — it's a read-only dashboard
+  selector:
+    matchLabels:
+      app: k8s-dashboard
+  template:
+    metadata:
+      labels:
+        app: k8s-dashboard
+    spec:
+      serviceAccountName: k8s-dashboard  # use the SA with read-only RBAC
+
+      containers:
+        - name: dashboard
+          image: yourregistry/k8s-dashboard:latest  # replace with your image
+          ports:
+            - containerPort: 8080
+          args:
+            - "-config=/etc/dashboard/config.yaml"  # point to mounted config
+
+          # Mount the ConfigMap as a file at /etc/dashboard/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dashboard
+              readOnly: true
+
+          # Resource limits — this app is very lightweight
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+          # Health check — k8s will restart the pod if /api/summary stops responding
+          livenessProbe:
+            httpGet:
+              path: /api/summary
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+      volumes:
+        - name: config
+          configMap:
+            name: dashboard-config

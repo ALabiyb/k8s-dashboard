@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign In · K8s Platform Health</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <script>
+    /* Apply saved theme before first paint to prevent flash */
+    (function () {
+      var t = localStorage.getItem('k8s_theme') ||
+        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <style>
+    :root {
+      --bg:           #f5f5f4;
+      --bg-card:      #ffffff;
+      --text:         #1c1917;
+      --text-muted:   #78716c;
+      --border:       #e7e5e4;
+      --input-bg:     #ffffff;
+      --btn-primary:  #0f172a;
+      --btn-hover:    #1e293b;
+      --error-bg:     #fee2e2;
+      --error-border: #fca5a5;
+      --error-text:   #b91c1c;
+      --focus-ring:   rgba(59,130,246,.18);
+    }
+    [data-theme="dark"] {
+      --bg:           #1c1917;
+      --bg-card:      #292524;
+      --text:         #fafaf9;
+      --text-muted:   #a8a29e;
+      --border:       #44403c;
+      --input-bg:     #1c1917;
+      --btn-primary:  #3b82f6;
+      --btn-hover:    #2563eb;
+      --error-bg:     #450a0a;
+      --error-border: #7f1d1d;
+      --error-text:   #fca5a5;
+      --focus-ring:   rgba(59,130,246,.25);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      transition: background .2s, color .2s;
+    }
+
+    /* ── Theme toggle (fixed, top-right) ─── */
+    .theme-toggle {
+      position: fixed; top: 16px; right: 16px;
+      width: 36px; height: 36px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 8px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--text-muted); transition: background .15s;
+    }
+    .theme-toggle:hover { background: var(--bg); }
+    .theme-toggle svg { width: 16px; height: 16px; }
+
+    /* ── Card ─── */
+    .login-card {
+      width: 100%; max-width: 380px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 40px 36px;
+      box-shadow: 0 4px 24px rgba(0,0,0,.06);
+    }
+
+    /* ── Brand block ─── */
+    .brand { text-align: center; margin-bottom: 32px; }
+    .brand-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 52px; height: 52px; border-radius: 14px;
+      background: #0f172a; margin-bottom: 16px;
+    }
+    [data-theme="dark"] .brand-icon { background: #3b82f6; }
+    .brand h1 { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+    .brand-sub { font-size: 12px; color: var(--text-muted); }
+
+    /* ── Form ─── */
+    .field { margin-bottom: 16px; }
+    .field label {
+      display: block; font-size: 13px; font-weight: 500;
+      color: var(--text); margin-bottom: 6px;
+    }
+    .field input {
+      width: 100%; padding: 10px 12px;
+      background: var(--input-bg); border: 1px solid var(--border);
+      border-radius: 8px; font-size: 14px; color: var(--text);
+      outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    .field input:focus {
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px var(--focus-ring);
+    }
+
+    /* ── Error box ─── */
+    .error-box {
+      background: var(--error-bg); border: 1px solid var(--error-border);
+      border-radius: 8px; padding: 10px 12px;
+      font-size: 13px; color: var(--error-text);
+      margin-bottom: 16px;
+    }
+
+    /* ── Submit button ─── */
+    button[type="submit"] {
+      width: 100%; padding: 11px;
+      background: var(--btn-primary); color: #fff;
+      border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 500; cursor: pointer;
+      margin-top: 8px; transition: background .15s;
+    }
+    button[type="submit"]:hover { background: var(--btn-hover); }
+
+    /* ── Footer copyright ─── */
+    .card-footer {
+      margin-top: 28px;
+      text-align: center;
+      font-size: 11px; color: var(--text-muted);
+      letter-spacing: .02em;
+    }
+
+    @media (max-width: 420px) {
+      .login-card { padding: 32px 24px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Theme toggle -->
+  <button class="theme-toggle" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light theme">
+    <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="12" cy="12" r="5"/>
+      <line x1="12" y1="1" x2="12" y2="3"/>
+      <line x1="12" y1="21" x2="12" y2="23"/>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+      <line x1="1" y1="12" x2="3" y2="12"/>
+      <line x1="21" y1="12" x2="23" y2="12"/>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+    </svg>
+  </button>
+
+  <div class="login-card">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
+             stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+          <path d="M2 17l10 5 10-5"/>
+          <path d="M2 12l10 5 10-5"/>
+        </svg>
+      </div>
+      <h1>Platform Health</h1>
+      <p class="brand-sub">K8s Dashboard &middot; DevSecOps</p>
+    </div>
+
+    <div id="error-box" class="error-box" style="display:none">
+      Invalid username or password. Please try again.
+    </div>
+
+    <form method="POST" action="/login">
+      <div class="field">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username"
+               autocomplete="username" autofocus required />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password"
+               autocomplete="current-password" required />
+      </div>
+      <button type="submit">Sign in</button>
+    </form>
+
+    <div class="card-footer">
+      &copy; 2026 DevSecOps Engineer Labiyb M Said
+    </div>
+  </div>
+
+  <script>
+    const THEME_KEY = 'k8s_theme';
+
+    function applyTheme(t) {
+      document.documentElement.setAttribute('data-theme', t);
+      const icon = document.getElementById('theme-icon');
+      if (t === 'dark') {
+        icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+      } else {
+        icon.innerHTML =
+          '<circle cx="12" cy="12" r="5"/>' +
+          '<line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>' +
+          '<line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>' +
+          '<line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>' +
+          '<line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>' +
+          '<line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>' +
+          '<line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>';
+      }
+    }
+
+    function toggleTheme() {
+      const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+    }
+
+    // Show error banner if redirected with ?error=1
+    if (new URLSearchParams(location.search).get('error')) {
+      document.getElementById('error-box').style.display = 'block';
+    }
+
+    // Sync icon with the theme that was applied in <head>
+    applyTheme(document.documentElement.getAttribute('data-theme') || 'light');
+  </script>
+</body>
+</html>
