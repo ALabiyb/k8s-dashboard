@@ -21,7 +21,7 @@ spec:
 
       containers:
         - name: dashboard
-          image: yourregistry/k8s-dashboard:1.0.0
+          image: harbor.devops.softnethq.co.tz/k8s_dashboard/k8s-dashboard:6
           ports:
             - containerPort: 8080
           args:
