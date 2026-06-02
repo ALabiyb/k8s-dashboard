@@ -26,6 +26,9 @@ spec:
             - containerPort: 8080
           args:
             - "-config=/etc/dashboard/config.yaml"  # point to mounted config
+          env:
+            - name: MOCK_MODE
+              value: "false"  # disable mock mode to use real cluster data
 
           # Mount the ConfigMap as a file at /etc/dashboard/config.yaml
           volumeMounts:
