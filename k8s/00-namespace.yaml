@@ -1,9 +1,0 @@
-# ── Namespace ─────────────────────────────────────────────────────────────
-# The dashboard lives in its own namespace so it's easy to manage/delete
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: k8s-dashboard
-  labels:
-    app: k8s-dashboard
-    app.kubernetes.io/part-of: k8s-dashboard
