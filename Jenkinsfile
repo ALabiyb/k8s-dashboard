@@ -62,6 +62,11 @@ pipeline {
         GIT_AUTHOR     = sh(script: 'git log -1 --pretty=format:"%an" 2>/dev/null || echo unknown', returnStdout: true).trim()
         APP_VERSION    = "1.0.${env.BUILD_NUMBER}"
         BUILD_DATE_UTC = sh(script: "date -u +'%Y-%m-%dT%H:%M:%SZ'", returnStdout: true).trim()
+
+        // Release version for production deploys (prod branch only).
+        // Set this by creating a VERSION file in the repo root containing e.g. "1.2.0",
+        // or override it as a Jenkins build parameter named RELEASE_VERSION.
+        RELEASE_VERSION = sh(script: "cat VERSION 2>/dev/null || echo ${env.APP_VERSION}", returnStdout: true).trim()
     }
     // =========================================================================
     // ↑↑↑ END OF PER-PROJECT SECTION ↑↑↑
@@ -200,7 +205,26 @@ pipeline {
             }
         }
 
+        // ── Production gate (prod branch only) ───────────────────────────────
+        // Emails the team for approval, then updates the manifest with the
+        // RELEASE_VERSION tag (from VERSION file) instead of the build number.
+        stage('Production Approval') {
+            when { branch 'prod' }
+            steps {
+                script {
+                    productionApproval(
+                        releaseVersion: env.RELEASE_VERSION,
+                        recipients:     env.NOTIFICATION_EMAIL,
+                        timeoutMinutes: 30
+                    )
+                }
+            }
+        }
+
+        // ── Regular manifest update (all branches except prod) ────────────────
+        // On prod, productionApproval() handles the manifest update above.
         stage('k8s Manifest Update') {
+            when { not { branch 'prod' } }
             steps {
                 script {
                     k8sManifestScanAndUpdate()
