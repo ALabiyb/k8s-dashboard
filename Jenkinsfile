@@ -33,12 +33,14 @@ pipeline {
         // Source repo
         GIT_REPO_URL       = 'http://192.168.15.85/devsecops1/k8s-dashboard.git'
         GIT_CREDENTIALS_ID = 'lsaid'
-        BRANCH_NAME        = 'main'
+        // BRANCH_NAME is set automatically by Jenkins Multibranch — do not override
 
         // K8s manifest repo
         K8S_MANIFEST_REPO_URL       = 'http://192.168.15.85/kubernetes-manifest/k8s-dashboard-manifest.git'
         K8S_MANIFEST_CREDENTIALS_ID = 'lsaid'
-        K8S_MANIFEST_BRANCH         = 'main'
+        K8S_MANIFEST_BRANCH         = 'dev'
+        K8S_MANIFEST_UAT_BRANCH     = 'uat'
+        K8S_MANIFEST_PROD_BRANCH    = 'prod'
         K8S_MANIFEST_PATHS          = 'k8s/02-deployment.yaml'
 
         // Build tool: maven | npm | node | next | go | gradle | dotnet
