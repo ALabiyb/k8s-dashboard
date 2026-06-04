@@ -161,7 +161,7 @@ pipeline {
                             GIT_AUTHOR  : env.GIT_AUTHOR,
                             GIT_COMMIT  : env.GIT_COMMIT,
                             BUILD_DATE  : new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'", TimeZone.getTimeZone('UTC')),
-                            VERSION     : "1.0.${env.BUILD_NUMBER}",
+                            VERSION     : env.RELEASE_VERSION,
                             APP_TIMEZONE: env.APP_TIMEZONE,
                             APP_NAME    : env.PROJECT_NAME
                         ]
