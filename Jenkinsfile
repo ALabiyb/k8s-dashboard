@@ -150,9 +150,13 @@ pipeline {
         stage('Build Docker Image and Publish') {
             steps {
                 script {
+                    // prod uses the release version as the image tag so ArgoCD can pull
+                    // the exact version; all other branches use the build number
+                    def deployTag = (env.BRANCH_NAME == 'prod') ? env.RELEASE_VERSION : env.BUILD_NUMBER
+                    env.DEPLOY_IMAGE_TAG = deployTag
                     def result = buildDockerImageAndPush(
                         imageName:              env.IMAGE_NAME,
-                        imageTag:               env.BUILD_NUMBER,
+                        imageTag:               deployTag,
                         harborProject:          env.HARBOR_PROJECT,
                         registryUrl:            env.REGISTRY_URL,
                         registryCredentialsId:  env.REGISTRY_CREDENTIALS_ID,
@@ -178,7 +182,7 @@ pipeline {
                         registryUrl:   env.REGISTRY_URL,
                         harborProject: env.HARBOR_PROJECT,
                         imageName:     env.IMAGE_NAME,
-                        imageTag:      env.BUILD_NUMBER
+                        imageTag:      env.DEPLOY_IMAGE_TAG
                     )
                 }
             }
@@ -189,7 +193,7 @@ pipeline {
                 script {
                     generateSbom(
                         projectName:    env.IMAGE_NAME,
-                        projectVersion: env.APP_VERSION
+                        projectVersion: env.DEPLOY_IMAGE_TAG
                     )
                 }
             }
@@ -264,6 +268,15 @@ pipeline {
         }
 
         success {
+            script {
+                sendSuccessNotification(
+                    recipients: env.NOTIFICATION_EMAIL,
+                    triggeredBy: detectBuildTrigger()
+                )
+            }
+        }
+
+        unstable {
             script {
                 sendSuccessNotification(
                     recipients: env.NOTIFICATION_EMAIL,
