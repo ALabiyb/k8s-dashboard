@@ -3,6 +3,14 @@
 A lightweight Go dashboard that watches your Kubernetes namespaces and shows a
 per-product health score — green/amber/red — with email alerts on state changes.
 
+📖 **[How it works / architecture guide](docs/ARCHITECTURE.md)** — start here to
+understand the codebase: components, request flow, the auth/session model, and
+the CI/CD → ArgoCD → Kubernetes deployment pipeline.
+
+🚦 **[Production readiness plan](docs/PRODUCTION_READINESS.md)** — an ordered,
+actionable checklist of what to fix/add before exposing this to real users
+(secrets, TLS, audit logging, RBAC review, and more).
+
 ```
 Product: ecommerce    ██████████ 12/12  ● Healthy
 Product: analytics    █████░░░░░  7/12  ● Critical  → email sent

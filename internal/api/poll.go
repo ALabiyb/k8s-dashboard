@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/yourorg/k8s-dashboard/internal/collector"
@@ -19,6 +19,7 @@ func (s *Server) pollLoop() {
 
 // poll fetches fresh data (real or mock), aggregates it, and checks for alerts.
 func (s *Server) poll() {
+	start := time.Now()
 	var snapshots []collector.NamespaceSnapshot
 
 	if s.mockMode {
@@ -30,7 +31,8 @@ func (s *Server) poll() {
 		var err error
 		snapshots, err = s.collector.CollectAll(ctx, s.cfg.ExcludedNS)
 		if err != nil {
-			fmt.Printf("[poll] error collecting from k8s: %v\n", err)
+			slog.Error("error collecting from k8s", "component", "poll", "error", err)
+			s.metrics.pollErrors.Add(1)
 			return
 		}
 	}
@@ -43,12 +45,27 @@ func (s *Server) poll() {
 
 	s.mu.Lock()
 	s.summary = summary
+	// Readiness flips true after the FIRST completed poll — this is what
+	// /readyz checks (see handlers.go). Liveness (/healthz) doesn't depend on
+	// this; a pod can be "alive" before its first poll completes, just not
+	// yet ready to serve meaningful data.
+	s.ready = true
 	s.mu.Unlock()
 
 	mode := "real"
 	if s.mockMode {
 		mode = "mock"
 	}
-	fmt.Printf("[poll:%s] %d products, %d/%d services healthy\n",
-		mode, len(summary.Products), summary.HealthyServices, summary.TotalServices)
+
+	// Record metrics for /metrics (see metrics.go) — plain atomic counters,
+	// no client library needed for a handful of gauges/counters.
+	duration := time.Since(start)
+	s.metrics.pollTotal.Add(1)
+	s.metrics.pollDurationMs.Store(duration.Milliseconds())
+
+	slog.Info("poll completed", "component", "poll", "mode", mode,
+		"products", len(summary.Products),
+		"healthy_services", summary.HealthyServices,
+		"total_services", summary.TotalServices,
+		"duration_ms", duration.Milliseconds())
 }

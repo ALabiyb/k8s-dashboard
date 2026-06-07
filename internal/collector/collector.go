@@ -7,6 +7,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -137,7 +138,7 @@ func (c *Collector) CollectAll(ctx context.Context, excludedNS []string) ([]Name
 			snap, err := c.collectNamespace(nsCtx, namespace)
 			if err != nil {
 				// Log the error and skip this namespace — don't abort the whole poll
-				fmt.Printf("[collector] error collecting %s: %v\n", namespace, err)
+				slog.Error("error collecting namespace", "component", "collector", "namespace", namespace, "error", err)
 				return
 			}
 

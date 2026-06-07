@@ -3,7 +3,7 @@ package main
 
 import (
 	"flag"
-	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/yourorg/k8s-dashboard/config"
@@ -11,6 +11,13 @@ import (
 )
 
 func main() {
+	// ── Structured logging ───────────────────────────────────────────────────
+	// JSON to stdout: easy to ship to a log aggregator and query/alert on
+	// (vs. the old free-text "[component] message" lines). Every log call in
+	// this codebase goes through slog's package-level functions, which use
+	// this default logger — see docs/PRODUCTION_READINESS.md §2.5.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	// ── Flags ────────────────────────────────────────────────────────────────
 	configPath := flag.String("config", "config/config.yaml", "path to config.yaml")
 
@@ -23,21 +30,21 @@ func main() {
 	// ── Config ───────────────────────────────────────────────────────────────
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
-	fmt.Printf("[main] config loaded | port: %d | poll: %s\n",
-		cfg.Server.Port, cfg.Server.PollInterval)
+	slog.Info("config loaded", "component", "main",
+		"port", cfg.Server.Port, "poll_interval", cfg.Server.PollInterval.String())
 
 	// ── Server ───────────────────────────────────────────────────────────────
 	server, err := api.New(cfg, *useMock)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create server: %v\n", err)
+		slog.Error("failed to create server", "error", err)
 		os.Exit(1)
 	}
 
 	if err := server.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
 }

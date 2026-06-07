@@ -4,15 +4,19 @@
 //   server.go   — Server struct, New(), Start(), getenv()
 //   poll.go     — background poll loop that keeps data fresh
 //   handlers.go — all HTTP handler methods
+//   metrics.go  — /metrics, /healthz, /readyz (operational endpoints)
 //
 // Endpoints:
 //   GET /            → login-protected HTML dashboard
-//   GET /login       → login page  (POST processes credentials)
+//   GET /login       → login page  (POST processes credentials, rate-limited)
 //   GET /logout      → clears session, redirects to /login
 //   GET /api/summary → current cluster health as JSON  (auth required)
 //   GET /api/mode    → mock/real flag for the UI banner (auth required)
 //   GET /api/me      → current user's username and role (auth required)
 //   GET /api/export  → download snapshot as JSON or CSV (admin only)
+//   GET /healthz     → liveness probe   (public — "is the process up")
+//   GET /readyz      → readiness probe  (public — "has the first poll landed")
+//   GET /metrics     → Prometheus-format operational counters (public)
 //
 // Auth: HMAC-signed cookie session. Credentials via env vars:
 //   ADMIN_USER / ADMIN_PASS   (default: admin / admin)
@@ -22,6 +26,7 @@ package api
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -45,9 +50,15 @@ type Server struct {
 	users      []auth.User
 	secret     string
 
-	// mu protects summary so the poll goroutine and handlers can share it safely.
+	// mu protects summary/ready so the poll goroutine and handlers can share
+	// them safely — poll() writes from a background goroutine, handlers read
+	// from per-request goroutines.
 	mu      sync.RWMutex
 	summary aggregator.Summary
+	ready   bool // set true after the first poll completes — see /readyz
+
+	// metrics holds plain atomic counters exposed via /metrics. See metrics.go.
+	metrics serverMetrics
 }
 
 // New wires up all dependencies and returns a ready-to-run Server.
@@ -59,7 +70,7 @@ func New(cfg *config.Config, useMock bool) (*Server, error) {
 	secret := getenv("DASHBOARD_SECRET", "")
 	if secret == "" {
 		secret = auth.GenerateSecret()
-		fmt.Println("[auth] WARNING: DASHBOARD_SECRET not set — sessions will not survive restarts")
+		slog.Warn("DASHBOARD_SECRET not set — sessions will not survive restarts", "component", "auth")
 	}
 
 	adminUser := getenv("ADMIN_USER", "admin")
@@ -68,28 +79,28 @@ func New(cfg *config.Config, useMock bool) (*Server, error) {
 	viewerPass := getenv("VIEWER_PASS", "viewer")
 
 	if adminPass == "admin" || viewerPass == "viewer" {
-		fmt.Println("[auth] WARNING: default credentials in use — set ADMIN_PASS / VIEWER_PASS env vars")
+		slog.Warn("default credentials in use — set ADMIN_PASS / VIEWER_PASS env vars", "component", "auth")
 	}
 	users := []auth.User{
 		{Username: adminUser, Password: adminPass, Role: auth.RoleAdmin},
 		{Username: viewerUser, Password: viewerPass, Role: auth.RoleViewer},
 	}
-	fmt.Printf("[auth] accounts: admin=%q viewer=%q\n", adminUser, viewerUser)
+	slog.Info("accounts configured", "component", "auth", "admin_user", adminUser, "viewer_user", viewerUser)
 
 	if useMock {
-		fmt.Println("[server] ⚠  MOCK MODE — using fake data, no k8s cluster needed")
+		slog.Warn("mock mode — using fake data, no k8s cluster needed", "component", "server")
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
 			mockMode: true, users: users, secret: secret}, nil
 	}
 
 	col, err := collector.New()
 	if err != nil {
-		fmt.Printf("[server] ⚠  k8s unavailable (%v) — falling back to MOCK MODE\n", err)
+		slog.Warn("k8s unavailable — falling back to mock mode", "component", "server", "error", err)
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
 			mockMode: true, users: users, secret: secret}, nil
 	}
 
-	fmt.Println("[server] connected to Kubernetes cluster ✓")
+	slog.Info("connected to Kubernetes cluster", "component", "server")
 	return &Server{cfg: cfg, collector: col, aggregator: agg, notifier: not,
 		mockMode: false, users: users, secret: secret}, nil
 }
@@ -101,7 +112,11 @@ func (s *Server) Start() error {
 	go s.pollLoop()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/login", auth.HandleLogin(s.users, s.secret))
+	// /login is wrapped in RateLimitLogin: a per-IP token bucket that throttles
+	// repeated POST attempts (brute-force credential guessing) without
+	// affecting normal use — see docs/PRODUCTION_READINESS.md §2.1 and the
+	// comment on auth.RateLimitLogin for the exact limits and reasoning.
+	mux.HandleFunc("/login", auth.RateLimitLogin(auth.HandleLogin(s.users, s.secret)))
 	mux.HandleFunc("/logout", auth.HandleLogout)
 	mux.HandleFunc("/api/summary", s.handleSummary)
 	mux.HandleFunc("/api/mode", s.handleMode)
@@ -111,10 +126,15 @@ func (s *Server) Start() error {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		http.ServeFile(w, r, "web/favicon.svg")
 	})
+	// Operational endpoints — public (see the bypass list in auth.Middleware):
+	// kubelet probes and Prometheus scrapers don't carry session cookies.
+	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/readyz", s.handleReadyz)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/", s.handleIndex)
 
 	addr := fmt.Sprintf(":%d", s.cfg.Server.Port)
-	fmt.Printf("[server] listening on http://localhost%s\n", addr)
+	slog.Info("listening", "component", "server", "addr", addr)
 	return http.ListenAndServe(addr, auth.Middleware(mux, s.secret))
 }
 

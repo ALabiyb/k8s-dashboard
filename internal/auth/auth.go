@@ -16,8 +16,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -68,6 +71,13 @@ func sign(payload, secret string) string {
 
 // createToken encodes a signed, expiring session token for the given user.
 // Format: base64url(username NUL role NUL expiry_unix) "." hmac_hex
+//
+// This is a deliberately minimal hand-rolled format rather than a JWT: no
+// library, no JSON, no algorithm-confusion surface — just three NUL-delimited
+// fields (usernames/roles can't contain NUL, so this can't be ambiguously
+// parsed) and an HMAC over the whole payload. The server is the only verifier,
+// so there's nothing to gain from a standardized, third-party-interoperable
+// format.
 func createToken(username, role, secret string) string {
 	exp := fmt.Sprintf("%d", time.Now().Add(sessionDuration).Unix())
 	raw := username + "\x00" + role + "\x00" + exp
@@ -111,6 +121,10 @@ func checkCredentials(users []User, username, password string) *User {
 	var match *User
 	for i := range users {
 		u := &users[i]
+		// No early `return` or `break` on match: every login attempt walks
+		// the full user list and runs the same constant-time comparisons,
+		// so the response time can't leak *which* user (if any) matched —
+		// only the final boolean outcome is observable.
 		if hmac.Equal([]byte(u.Username), []byte(username)) &&
 			hmac.Equal([]byte(u.Password), []byte(password)) {
 			match = u
@@ -124,7 +138,14 @@ func checkCredentials(users []User, username, password string) *User {
 func Middleware(next http.Handler, secret string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		if p == "/login" || p == "/logout" {
+		// Routes that must stay reachable WITHOUT a session cookie:
+		//   /login, /logout    — the auth flow itself (can't require auth to log in)
+		//   /healthz, /readyz  — kubelet probes never send cookies; gating these
+		//                        would make the pod un-probeable and get it killed
+		//   /metrics           — Prometheus scrapers don't carry dashboard sessions
+		// None of these expose cluster data — see metrics.go for what /metrics
+		// actually returns (operational counters only, no namespace/pod detail).
+		if p == "/login" || p == "/logout" || p == "/healthz" || p == "/readyz" || p == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -135,10 +156,15 @@ func Middleware(next http.Handler, secret string) http.Handler {
 		}
 		claims, ok := parseToken(cookie.Value, secret)
 		if !ok {
+			// Bad signature, malformed token, or expired — clear the stale
+			// cookie so the browser doesn't keep resending it on every request.
 			clearSession(w)
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
+		// claimsKey{} is an unexported empty struct used purely as a context
+		// key — guarantees no collision with keys set by other packages
+		// (string keys can collide; typed empty-struct keys can't).
 		ctx := context.WithValue(r.Context(), claimsKey{}, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -155,6 +181,22 @@ func RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// loginSuccessTotal/loginFailureTotal back LoginStats(), exposed via the
+// dashboard's /metrics endpoint (internal/api/metrics.go) so sustained growth
+// in failures — a brute-force signal — can be alerted on. Package-level
+// because there's exactly one auth configuration per process; see
+// docs/PRODUCTION_READINESS.md §2.3/§2.5.
+var (
+	loginSuccessTotal atomic.Int64
+	loginFailureTotal atomic.Int64
+)
+
+// LoginStats returns the cumulative login attempt counts by outcome since
+// process start, for exposition via /metrics.
+func LoginStats() (successTotal, failureTotal int64) {
+	return loginSuccessTotal.Load(), loginFailureTotal.Load()
+}
+
 // HandleLogin serves GET /login (the login page) and processes POST /login (credentials).
 func HandleLogin(users []User, secret string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -162,15 +204,27 @@ func HandleLogin(users []User, secret string) http.HandlerFunc {
 		case http.MethodGet:
 			http.ServeFile(w, r, "web/login.html")
 		case http.MethodPost:
+			ip := clientIP(r)
 			if err := r.ParseForm(); err != nil {
 				http.Redirect(w, r, "/login?error=1", http.StatusFound)
 				return
 			}
-			user := checkCredentials(users, r.FormValue("username"), r.FormValue("password"))
+			username := r.FormValue("username")
+			user := checkCredentials(users, username, r.FormValue("password"))
 			if user == nil {
+				// Audit log the FAILED attempt — username + remote IP, NEVER
+				// the password. This is what lets you later answer "who's
+				// hammering the login page, and as whom?" — see
+				// docs/PRODUCTION_READINESS.md §2.3.
+				loginFailureTotal.Add(1)
+				slog.Warn("login failed", "component", "auth", "event", "login_failure",
+					"username_attempted", username, "remote_addr", ip)
 				http.Redirect(w, r, "/login?error=1", http.StatusFound)
 				return
 			}
+			loginSuccessTotal.Add(1)
+			slog.Info("login succeeded", "component", "auth", "event", "login_success",
+				"username", user.Username, "role", user.Role, "remote_addr", ip)
 			http.SetCookie(w, &http.Cookie{
 				Name:     cookieName,
 				Value:    createToken(user.Username, user.Role, secret),
@@ -188,8 +242,26 @@ func HandleLogin(users []User, secret string) http.HandlerFunc {
 
 // HandleLogout clears the session cookie and redirects to /login.
 func HandleLogout(w http.ResponseWriter, r *http.Request) {
+	if c := GetClaims(r); c != nil {
+		slog.Info("logout", "component", "auth", "event", "logout", "username", c.Username)
+	}
 	clearSession(w)
 	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+// clientIP extracts the request's source IP for audit-logging and rate-
+// limiting purposes. It deliberately uses r.RemoteAddr — NOT the
+// X-Forwarded-For / X-Real-IP headers — because those are client-supplied
+// and trivially spoofable unless your edge proxy is configured to strip
+// client-sent values and overwrite them with the real address. If this app
+// runs behind a trusted reverse proxy that does that correctly, switch this
+// to read the trusted header instead (and only then).
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func clearSession(w http.ResponseWriter) {

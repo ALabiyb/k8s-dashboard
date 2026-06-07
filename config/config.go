@@ -69,5 +69,13 @@ func Load(path string) (*Config, error) {
 		cfg.Thresholds.Degraded = 70
 	}
 
+	// SMTP_PASSWORD overrides whatever is in config.yaml when set. This lets
+	// the real password live in a Kubernetes Secret (mounted as an env var)
+	// instead of the committed/ConfigMap'd YAML — see
+	// k8s/k8s/02-deployment.yaml and docs/PRODUCTION_READINESS.md §1.3.
+	if pw := os.Getenv("SMTP_PASSWORD"); pw != "" {
+		cfg.Notifications.Email.SMTPPassword = pw
+	}
+
 	return &cfg, nil
 }

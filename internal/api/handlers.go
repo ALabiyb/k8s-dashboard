@@ -10,12 +10,23 @@ import (
 )
 
 // handleSummary serves the current health summary as JSON.
+//
+// Note this is identical for every role — admin and viewer both get the full
+// Summary including per-pod detail. Nothing is filtered server-side by role;
+// the only role-based differences are *capabilities* (export, drill-down UI),
+// not *data visibility*. See docs/ARCHITECTURE.md §4.2 for the full picture.
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
+	// Read the cached summary under a read-lock — it's overwritten wholesale
+	// by poll() (in poll.go) every poll_interval from a different goroutine,
+	// so concurrent reads/writes need this mutex (s.mu) to be race-free.
 	s.mu.RLock()
 	summary := s.summary
 	s.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
+	// Short client-side cache: smooths out bursts of near-simultaneous
+	// requests (e.g. several browser tabs polling) without serving data
+	// that's meaningfully stale relative to the 30s poll_interval.
 	w.Header().Set("Cache-Control", "max-age=15")
 	if err := json.NewEncoder(w).Encode(summary); err != nil {
 		http.Error(w, "failed to encode response", http.StatusInternalServerError)

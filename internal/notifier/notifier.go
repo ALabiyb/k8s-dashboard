@@ -7,6 +7,7 @@ package notifier
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"net/smtp"
 	"strings"
 	"text/template"
@@ -43,9 +44,11 @@ func (n *Notifier) CheckAndNotify(summary aggregator.Summary) {
 		}
 
 		if err := n.sendEmail(product); err != nil {
-			fmt.Printf("[notifier] failed to send email for %s: %v\n", product.Namespace, err)
+			slog.Error("failed to send alert email", "component", "notifier",
+				"namespace", product.Namespace, "error", err)
 		} else {
-			fmt.Printf("[notifier] sent alert for %s (%s)\n", product.Namespace, aggregator.FormatStateChange(product))
+			slog.Info("sent alert email", "component", "notifier",
+				"namespace", product.Namespace, "transition", aggregator.FormatStateChange(product))
 		}
 	}
 }

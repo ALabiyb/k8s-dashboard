@@ -66,7 +66,15 @@ func (a *Aggregator) Aggregate(snapshots []collector.NamespaceSnapshot) Summary 
 		product := a.computeProduct(snap)
 		summary.Products = append(summary.Products, product)
 
-		// Roll up service counts into the cluster summary
+		// Roll up service counts into the cluster summary.
+		//
+		// NOTE: svc.Status (per-SERVICE) and product.Health (per-NAMESPACE)
+		// are deliberately different enums with different string values —
+		// {"Healthy","Degraded","Unhealthy"} vs {"Healthy","Degraded","Critical"}.
+		// Don't assume they're interchangeable when reading this code (or the
+		// frontend's JSON): a namespace's overall Health is *derived* from a
+		// score threshold (scoreToHealth, below), not a roll-up of its
+		// services' individual Status strings.
 		summary.TotalServices += product.TotalCount
 		summary.HealthyServices += product.HealthyCount
 		for _, svc := range product.Services {
