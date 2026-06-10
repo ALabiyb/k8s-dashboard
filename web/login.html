@@ -150,7 +150,7 @@
       <div class="login-brand">
         <div class="mark"><div class="sweep"></div><div class="ring"></div><div class="ring r2"></div><div class="core"></div></div>
         <div>
-          <div class="brand-name">Platform <span>Health</span></div>
+          <div class="brand-name">Development <span>Environment</span></div>
           <div class="login-tag">Kubernetes Cluster Observability</div>
         </div>
       </div>
@@ -168,11 +168,11 @@
         <p>Authenticate to view the live cluster dashboard.</p>
       </div>
 
-      <button type="button" class="sso-btn" id="sso-btn">
+      <a href="/auth/login" class="sso-btn">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 0 1 6 0v3H9Z"/></svg>
-        Continue with Single Sign-On
-      </button>
-      <div class="lc-or"><span>or use credentials</span></div>
+        Continue with Keycloak SSO
+      </a>
+      <div class="lc-or"><span>or use local credentials</span></div>
 
       <label class="field">
         <span>Username</span>
@@ -184,28 +184,19 @@
       </label>
 
       <div class="lc-err" id="error-box">Invalid username or password. Please try again.</div>
+      <div class="lc-err" id="error-access">Your Keycloak account does not have a dashboard role assigned. Ask your admin to assign <b>dashboard-admin</b> or <b>dashboard-viewer</b>.</div>
 
       <button type="submit" class="lc-submit">Sign in to dashboard</button>
-      <div class="lc-hint">Demo — click <b>Single Sign-On</b> to prefill admin credentials, then Sign in.</div>
+      <div class="lc-hint">Use <b>Keycloak SSO</b> above, or enter local credentials if SSO is unavailable.</div>
     </form>
   </div>
 
   <script>
-    // NOTE: this is a UI mock, not a real SSO integration — it just prefills
-    // the demo admin credentials into the form below (which still POSTs to
-    // the real /login handler in internal/auth/auth.go). To wire up a real
-    // identity provider (e.g. Keycloak/OIDC), this handler would instead
-    // redirect the browser to an authorization endpoint such as
-    // GET /auth/login, which kicks off the OAuth2 Authorization Code flow —
-    // see docs/ARCHITECTURE.md §4.3 for exactly where that plugs into the
-    // existing session/cookie machinery (createToken, Middleware, etc. all
-    // stay unchanged).
-    document.getElementById('sso-btn').addEventListener('click', function () {
-      document.getElementById('username').value = 'admin';
-      document.getElementById('password').value = 'admin';
-    });
-
-    if (new URLSearchParams(location.search).get('error')) {
+    const params = new URLSearchParams(location.search);
+    const err = params.get('error');
+    if (err === 'access_denied') {
+      document.getElementById('error-access').classList.add('show');
+    } else if (err) {
       document.getElementById('error-box').classList.add('show');
     }
 

@@ -1,15 +1,8 @@
 # K8s Platform Health Dashboard
 
 A lightweight Go dashboard that watches your Kubernetes namespaces and shows a
-per-product health score — green/amber/red — with email alerts on state changes.
-
-📖 **[How it works / architecture guide](docs/ARCHITECTURE.md)** — start here to
-understand the codebase: components, request flow, the auth/session model, and
-the CI/CD → ArgoCD → Kubernetes deployment pipeline.
-
-🚦 **[Production readiness plan](docs/PRODUCTION_READINESS.md)** — an ordered,
-actionable checklist of what to fix/add before exposing this to real users
-(secrets, TLS, audit logging, RBAC review, and more).
+per-product health score — green/amber/red — with email alerts on state changes
+and Keycloak SSO for single sign-on.
 
 ```
 Product: ecommerce    ██████████ 12/12  ● Healthy
@@ -17,139 +10,64 @@ Product: analytics    █████░░░░░  7/12  ● Critical  → em
 Product: auth         ████████░░  8/10  ● Degraded
 ```
 
----
-
-## Project structure
-
-```
-k8s-dashboard/
-├── cmd/server/main.go          ← entrypoint
-├── internal/
-│   ├── collector/              ← talks to k8s API, fetches raw state
-│   ├── aggregator/             ← computes health scores
-│   ├── notifier/               ← sends email alerts
-│   └── api/                    ← HTTP server + poll loop
-├── web/index.html              ← frontend dashboard
-├── config/config.yaml          ← your settings (thresholds, SMTP, etc.)
-├── k8s/
-│   ├── rbac.yaml               ← ServiceAccount + ClusterRole
-│   └── deployment.yaml         ← Namespace, ConfigMap, Deployment, Service
-└── Dockerfile
-```
-
----
-
-## Option A — Docker (no Go install needed)
-
-### Just want to see the UI with fake data?
+## Quick start (mock mode — no cluster needed)
 
 ```bash
 docker compose up
 ```
-Then open http://localhost:8080 — that's it. No Go, no k8s cluster needed.
-A yellow "Mock mode" banner appears in the UI so you know it's fake data.
 
-### Want to point it at your real cluster?
+Open **http://localhost:8080** — no Go, no Kubernetes cluster needed. Runs with
+fake data and shows a yellow "Mock mode" banner so you know it isn't real.
 
-```bash
-docker compose --profile real up
-```
-This mounts your `~/.kube/config` into the container automatically.
-
----
-
-## Option B — Run with Go (faster for development)
-
-### Prerequisites
-- Go 1.21+
+## Real cluster mode
 
 ```bash
-# 1. Install dependencies
-go mod tidy
-
-# 2. Mock mode (no cluster needed):
-go run ./cmd/server -mock
-
-# 3. Or real mode (uses ~/.kube/config automatically):
-go run ./cmd/server
-
-# 4. Open browser
-open http://localhost:8080
+docker compose --profile real up   # mounts ~/.kube/config automatically
 ```
 
----
-
-## Deploying to your k8s cluster
-
-### 1. Build and push the Docker image
+## With Keycloak SSO
 
 ```bash
-# Replace with your actual registry
-docker build -t yourregistry/k8s-dashboard:latest .
-docker push yourregistry/k8s-dashboard:latest
+OIDC_CLIENT_SECRET=<your-client-secret> docker compose up
 ```
 
-### 2. Update the image in deployment.yaml
+> **Note:** The `redirect_url` in `config/config.yaml` must match a registered
+> Valid Redirect URI in your Keycloak client. For docker compose the URL is
+> `http://localhost:8080/auth/callback`. For local `go run` it is
+> `http://localhost:8090/auth/callback`.
+>
+> Your Keycloak user must have the realm role `dashboard-admin` or
+> `dashboard-viewer` assigned.
 
-Edit `k8s/deployment.yaml` and replace:
-```yaml
-image: yourregistry/k8s-dashboard:latest
+## Local development
+
+```powershell
+# With mock data (no cluster needed):
+$env:OIDC_CLIENT_SECRET = "your-secret"; go run ./cmd/server -mock -config config/config.yaml
+
+# With a real kubeconfig:
+$env:KUBECONFIG = "C:\Users\you\.kube\config"
+$env:OIDC_CLIENT_SECRET = "your-secret"
+go run ./cmd/server -config config/config.yaml
 ```
 
-### 3. Update SMTP config in deployment.yaml
+Open **http://localhost:8090**
 
-The ConfigMap in `k8s/deployment.yaml` contains `config.yaml` inline.
-Update the SMTP credentials there (or use a Secret — see tip below).
+## Default credentials (local / non-SSO)
 
-### 4. Apply to the cluster
+| Role   | Username | Password | Access          |
+|--------|----------|----------|-----------------|
+| Admin  | admin    | admin    | Full + export   |
+| Viewer | viewer   | viewer   | Read-only       |
 
-```bash
-# Create RBAC first (needs cluster-admin to apply)
-kubectl apply -f k8s/rbac.yaml
+Override with `ADMIN_PASS` / `VIEWER_PASS` env vars before exposing externally.
 
-# Then deploy
-kubectl apply -f k8s/deployment.yaml
+## Documentation
 
-# Check it started
-kubectl -n k8s-dashboard get pods
-kubectl -n k8s-dashboard logs -f deploy/k8s-dashboard
-```
+📖 **[Architecture, technology & operations guide](docs/ARCHITECTURE.md)** —
+tech stack, architecture diagrams, component breakdown, auth/session model,
+RBAC, all run/deploy instructions, and the CI/CD → ArgoCD pipeline. **Start here.**
 
-### 5. Access the dashboard
-
-```bash
-# Port-forward for quick access
-kubectl -n k8s-dashboard port-forward svc/k8s-dashboard 8080:80
-open http://localhost:8080
-```
-
-Or uncomment the Ingress block in `deployment.yaml` for permanent external access.
-
----
-
-## Tweaking things
-
-| What to change | Where |
-|---|---|
-| Poll interval | `config.yaml` → `server.poll_interval` |
-| Health thresholds | `config.yaml` → `thresholds.healthy / degraded` |
-| SMTP settings | `config.yaml` → `notifications.email` |
-| Excluded namespaces | `config.yaml` → `excluded_namespaces` |
-| Health scoring logic | `internal/aggregator/aggregator.go` → `scoreToHealth()` |
-| Pod crash detection | `internal/collector/collector.go` → `enrichWithPodProblems()` |
-| Email template | `internal/notifier/notifier.go` → `emailTemplate` |
-| Dashboard UI | `web/index.html` |
-
----
-
-## Security tip: store SMTP password in a k8s Secret
-
-Instead of putting the password in the ConfigMap, create a Secret:
-
-```bash
-kubectl -n k8s-dashboard create secret generic smtp-credentials \
-  --from-literal=password=your-actual-password
-```
-
-Then mount it as an env variable in the Deployment and read it in the config loader.
-(Left as an exercise — see `config/config.go` to add env var override support.)
+🚦 **[Production readiness checklist](docs/PRODUCTION_READINESS.md)** — ordered
+list of what to harden before exposing to real users (secrets, TLS, audit
+logging, RBAC review, and more).

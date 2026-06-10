@@ -49,6 +49,7 @@ type Server struct {
 	mockMode   bool
 	users      []auth.User
 	secret     string
+	oidc       *auth.OIDCHandler // nil when OIDC is disabled in config
 
 	// mu protects summary/ready so the poll goroutine and handlers can share
 	// them safely — poll() writes from a background goroutine, handlers read
@@ -87,22 +88,36 @@ func New(cfg *config.Config, useMock bool) (*Server, error) {
 	}
 	slog.Info("accounts configured", "component", "auth", "admin_user", adminUser, "viewer_user", viewerUser)
 
+	oidcHandler, err := auth.NewOIDCHandler(cfg.OIDC, secret)
+	if err != nil {
+		// OIDC init failure is non-fatal: log a warning and continue with local
+		// credentials only. This lets the server start even when Keycloak is
+		// temporarily unreachable (e.g. cluster not yet up, cert issues during
+		// local dev). The SSO button on the login page will redirect to
+		// /auth/login, which returns a clear error when oidcHandler is nil.
+		slog.Warn("OIDC disabled — falling back to local credentials only",
+			"component", "auth", "error", err)
+	} else if oidcHandler != nil {
+		slog.Info("OIDC enabled", "component", "auth",
+			"issuer", cfg.OIDC.IssuerURL, "client_id", cfg.OIDC.ClientID)
+	}
+
 	if useMock {
 		slog.Warn("mock mode — using fake data, no k8s cluster needed", "component", "server")
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
-			mockMode: true, users: users, secret: secret}, nil
+			mockMode: true, users: users, secret: secret, oidc: oidcHandler}, nil
 	}
 
 	col, err := collector.New()
 	if err != nil {
 		slog.Warn("k8s unavailable — falling back to mock mode", "component", "server", "error", err)
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
-			mockMode: true, users: users, secret: secret}, nil
+			mockMode: true, users: users, secret: secret, oidc: oidcHandler}, nil
 	}
 
 	slog.Info("connected to Kubernetes cluster", "component", "server")
 	return &Server{cfg: cfg, collector: col, aggregator: agg, notifier: not,
-		mockMode: false, users: users, secret: secret}, nil
+		mockMode: false, users: users, secret: secret, oidc: oidcHandler}, nil
 }
 
 // Start runs the initial poll, launches the background poll goroutine,
@@ -126,6 +141,18 @@ func (s *Server) Start() error {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		http.ServeFile(w, r, "web/favicon.svg")
 	})
+	// OIDC endpoints — public (see bypass list in auth.Middleware).
+	// Registered regardless so /auth/login always gives a clear error rather
+	// than a 404 when OIDC is disabled or misconfigured.
+	if s.oidc != nil {
+		mux.HandleFunc("/auth/login", s.oidc.LoginHandler())
+		mux.HandleFunc("/auth/callback", s.oidc.CallbackHandler())
+	} else {
+		mux.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/login?error=oidc_disabled", http.StatusFound)
+		})
+	}
+
 	// Operational endpoints — public (see the bypass list in auth.Middleware):
 	// kubelet probes and Prometheus scrapers don't carry session cookies.
 	mux.HandleFunc("/healthz", s.handleHealthz)

@@ -53,7 +53,7 @@ straight in.
   per-environment — dev/staging/prod should NOT share credentials. The
   Deployment already wires all four keys to their env vars. Or — better —
   skip this whole local-credential model and go straight to Keycloak/OIDC
-  (see `docs/ARCHITECTURE.md` §4.3 for the integration point), which removes
+  (see `docs/ARCHITECTURE.md` §7.3 for the integration point), which removes
   password management from this app entirely.
 - **Verify**: the `[auth] WARNING: default credentials in use` log line
   disappears on boot.
@@ -183,6 +183,35 @@ straight in.
 ---
 
 ## Phase 3 — Hardening and polish
+
+> **Status**: 3.2, 3.3, and 3.4 are resolved. **3.2** turned out to already be
+> covered — the `Jenkinsfile` runs two image-vulnerability stages
+> (`vulnScanDocker`, `vulnScanApplicationImage`, both Trivy-based per the
+> shared library and the build-flow diagram in `docs/ARCHITECTURE.md`) plus
+> SBOM generation and DefectDojo publishing; nothing to add. **3.3**: reviewed
+> `internal/collector/collector.go` against `k8s/k8s/06-clusterrole.yaml` —
+> the collector only ever calls `.List()` (never `.Get()`/`.Watch()`/informers),
+> so the role's `get`/`watch` verbs were unused; trimmed to `list`-only across
+> all three rules, with a comment pointing at the grep that proves it. The
+> `ClusterRole` (vs. namespaced `Role`s) is correctly scoped — the app
+> dynamically discovers namespaces via `Namespaces().List`, which a namespaced
+> `Role` can't grant. **3.4**: resource `requests`/`limits` were already set in
+> `k8s/k8s/02-deployment.yaml`; while there, also replaced the liveness probe
+> (which pointed at the *authenticated* `/api/summary` and only "worked"
+> because kubelet treats the 302→`/login` redirect as success) with proper
+> `/healthz`/`/readyz` probes — closing the exact operational gap called out in
+> the Phase 2 status note. **No PodDisruptionBudget was added**: with
+> `replicas: 1`, a PDB's `minAvailable` can never be satisfied during a
+> voluntary eviction, so it would only block node drains, not protect anything
+> — see the comment above `replicas: 1` for the add-it-when-you-scale guidance.
+>
+> **3.1 and 3.5 remain deliberately deferred** — both are explicitly written
+> in this doc as "do this *when* a triggering condition occurs" (3.1: the first
+> state-changing admin action beyond login/logout; 3.5: a real compliance/
+> offboarding-SLA requirement for early session revocation). Neither condition
+> exists yet, and building either now would be exactly the kind of speculative
+> abstraction this project avoids — they're correctly captured as "watch for
+> the trigger," not "implement preemptively."
 
 ### 3.1 Add CSRF protection to state-changing requests
 - **Why it matters**: `/login` and `/logout` are POST/GET forms relying on

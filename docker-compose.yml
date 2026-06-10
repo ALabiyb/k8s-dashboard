@@ -8,12 +8,18 @@
 #   2. Real mode with your local kubeconfig:
 #      docker compose --profile real up
 #
-#   3. Override credentials (recommended before exposing externally):
-#      ADMIN_PASS=mysecret VIEWER_PASS=readonly docker compose up
+#   3. Override credentials / OIDC secret:
+#      ADMIN_PASS=mysecret OIDC_CLIENT_SECRET=xxx docker compose up
 #
 # Auth defaults (change before production!):
 #   admin  / admin   → full access  (set ADMIN_PASS  to override)
 #   viewer / viewer  → read-only    (set VIEWER_PASS to override)
+#
+# Keycloak SSO:
+#   Set OIDC_CLIENT_SECRET to your Keycloak client secret.
+#   The redirect_url in config.yaml must be registered in Keycloak as a
+#   Valid Redirect URI — update it to match the URL you use to access the
+#   dashboard (e.g. http://localhost:8080/auth/callback for docker compose).
 
 services:
 
@@ -23,7 +29,7 @@ services:
   dashboard-mock:
     build: .
     ports:
-      - "8080:8081"          # host:container — config.yaml uses 8081 internally
+      - "8080:8090"          # host:container — config.yaml uses port 8090 internally
     environment:
       - MOCK_MODE=true
 
@@ -34,6 +40,9 @@ services:
       - VIEWER_PASS=${VIEWER_PASS:-viewer}
       # Leave blank to auto-generate (sessions won't survive container restart)
       - DASHBOARD_SECRET=${DASHBOARD_SECRET:-}
+
+      # ── Keycloak SSO (optional — leave blank to use local credentials) ──
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
     profiles:
       - ""                   # default profile — runs with plain: docker compose up
       - mock
@@ -43,7 +52,7 @@ services:
   dashboard-real:
     build: .
     ports:
-      - "8080:8081"
+      - "8080:8090"
     environment:
       - MOCK_MODE=false
       - KUBECONFIG=/root/.kube/config
@@ -54,6 +63,9 @@ services:
       - VIEWER_USER=${VIEWER_USER:-viewer}
       - VIEWER_PASS=${VIEWER_PASS:-viewer}
       - DASHBOARD_SECRET=${DASHBOARD_SECRET:-}
+
+      # ── Keycloak SSO (optional — leave blank to use local credentials) ──
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
     volumes:
       - ~/.kube/config:/root/.kube/config:ro
     profiles:

@@ -13,6 +13,21 @@ type Config struct {
 	ExcludedNS    []string            `yaml:"excluded_namespaces"`
 	Thresholds    ThresholdConfig     `yaml:"thresholds"`
 	Notifications NotificationConfig  `yaml:"notifications"`
+	OIDC          OIDCConfig          `yaml:"oidc"`
+}
+
+// OIDCConfig holds Keycloak / OpenID Connect settings.
+// ClientSecret must be set via the OIDC_CLIENT_SECRET env var in production
+// (same pattern as SMTP_PASSWORD) — never commit a real secret to YAML.
+type OIDCConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	IssuerURL     string `yaml:"issuer_url"`      // e.g. https://keycloak.example.com/realms/myrealm
+	ClientID      string `yaml:"client_id"`
+	ClientSecret  string `yaml:"client_secret"`   // overridden by OIDC_CLIENT_SECRET env var
+	RedirectURL   string `yaml:"redirect_url"`    // must be registered in the Keycloak client
+	AdminRole     string `yaml:"admin_role"`      // Keycloak realm role → maps to dashboard admin
+	ViewerRole    string `yaml:"viewer_role"`     // Keycloak realm role → maps to dashboard viewer
+	TLSSkipVerify bool   `yaml:"tls_skip_verify"` // skip TLS cert check for internal/self-signed CAs (dev only)
 }
 
 type ServerConfig struct {
@@ -75,6 +90,13 @@ func Load(path string) (*Config, error) {
 	// k8s/k8s/02-deployment.yaml and docs/PRODUCTION_READINESS.md §1.3.
 	if pw := os.Getenv("SMTP_PASSWORD"); pw != "" {
 		cfg.Notifications.Email.SMTPPassword = pw
+	}
+
+	// OIDC_CLIENT_SECRET overrides the YAML value for the same reason —
+	// the Keycloak client secret should live in a Kubernetes Secret, not in a
+	// ConfigMap or committed YAML file.
+	if s := os.Getenv("OIDC_CLIENT_SECRET"); s != "" {
+		cfg.OIDC.ClientSecret = s
 	}
 
 	return &cfg, nil

@@ -136,6 +136,14 @@
     .refresh .rfill { stroke: var(--accent); animation: countdown var(--refresh-dur) linear infinite; }
     @keyframes countdown { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 50.26px; } }
 
+    /* Toolbar + account chip travel as one unit. `margin-left: auto` pushes
+       this group to the end of whichever flex line it ends up on — so on
+       wide screens it sits flush right on row 1, and if the header ever
+       wraps (e.g. on a TV/kiosk browser with a narrower effective viewport
+       than a dev monitor), the whole group wraps together as a tidy
+       right-aligned cluster on row 2 instead of splitting mid-row. */
+    .header-actions { display: flex; align-items: center; gap: 14px; flex: none; margin-left: auto; }
+
     /* toolbar buttons */
     .toolbar { display: flex; align-items: center; gap: 7px; flex: none; }
     .ico-btn, .text-btn {
@@ -415,7 +423,7 @@
     <div class="brand">
       <div class="mark"><div class="sweep"></div><div class="ring"></div><div class="ring r2"></div><div class="core"></div></div>
       <div class="brand-txt">
-        <div class="brand-name">Platform <span>Health</span></div>
+        <div class="brand-name">Development <span>Environment</span></div>
         <div class="brand-sub">
           <span id="last-checked">Loading&hellip;</span>
           <span>&middot;</span>
@@ -458,6 +466,7 @@
       </div>
     </div>
 
+    <div class="header-actions">
     <div class="toolbar">
       <button class="ico-btn" id="focus-btn" title="Focus mode — show issues only">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M3 12c2.5-5 6.5-8 9-8s6.5 3 9 8c-2.5 5-6.5 8-9 8s-6.5-3-9-8Z"/></svg>
@@ -505,6 +514,7 @@
           Sign out
         </a>
       </div>
+    </div>
     </div>
   </header>
 

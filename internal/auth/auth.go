@@ -143,9 +143,18 @@ func Middleware(next http.Handler, secret string) http.Handler {
 		//   /healthz, /readyz  — kubelet probes never send cookies; gating these
 		//                        would make the pod un-probeable and get it killed
 		//   /metrics           — Prometheus scrapers don't carry dashboard sessions
+		//   /api/mode          — the login page's "DATA SOURCE" panel fetches this
+		//                        before a session exists; gating it just makes the
+		//                        fetch 302-redirect back to /login, so the JSON
+		//                        parse fails and the panel is stuck on "Unknown"
+		//   /auth/login        — initiates the Keycloak OIDC redirect; must be
+		//                        reachable without a session (it IS the login flow)
+		//   /auth/callback     — Keycloak posts back here; the browser carries no
+		//                        dashboard session cookie at this point
 		// None of these expose cluster data — see metrics.go for what /metrics
-		// actually returns (operational counters only, no namespace/pod detail).
-		if p == "/login" || p == "/logout" || p == "/healthz" || p == "/readyz" || p == "/metrics" {
+		// actually returns (operational counters only, no namespace/pod detail),
+		// and handleMode (handlers.go) for /api/mode (just a {"mock": bool} flag).
+		if p == "/login" || p == "/logout" || p == "/healthz" || p == "/readyz" || p == "/metrics" || p == "/api/mode" || p == "/auth/login" || p == "/auth/callback" {
 			next.ServeHTTP(w, r)
 			return
 		}

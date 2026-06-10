@@ -29,7 +29,7 @@ RUN chown -R appuser:appgroup /app
 
 USER appuser
 
-EXPOSE 8080
+EXPOSE 8090
 
 # MOCK_MODE=true → use fake data (no kubeconfig needed)
 ENV MOCK_MODE=true
