@@ -28,7 +28,7 @@ oidc:
   issuer_url: "https://keycloak.devops.softnethq.co.tz/realms/k8s%20dashboard"
   client_id: "k8s-dashboard"
   client_secret: ""                              # set via OIDC_CLIENT_SECRET env var
-  redirect_url: "http://localhost:8090/auth/callback"
+  redirect_url: "http://localhost:8099/auth/callback"
   admin_role: "dashboard-admin"
   viewer_role: "dashboard-viewer"
   # Set true only when Keycloak uses an internal/self-signed CA not in the OS trust store.
