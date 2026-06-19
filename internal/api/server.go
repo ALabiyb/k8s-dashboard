@@ -24,7 +24,13 @@
 //   DASHBOARD_SECRET          (default: random — sessions lost on restart)
 package api
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -49,6 +55,7 @@ type Server struct {
 	mockMode   bool
 	users      []auth.User
 	secret     string
+	embedToken string
 	oidc       *auth.OIDCHandler // nil when OIDC is disabled in config
 
 	// mu protects summary/ready so the poll goroutine and handlers can share
@@ -60,6 +67,10 @@ type Server struct {
 
 	// metrics holds plain atomic counters exposed via /metrics. See metrics.go.
 	metrics serverMetrics
+
+	// indexHTML is the pre-rendered index.html with APP_ENV substituted in.
+	// Built once at startup so every request is a cheap in-memory write.
+	indexHTML []byte
 }
 
 // New wires up all dependencies and returns a ready-to-run Server.
@@ -67,6 +78,11 @@ type Server struct {
 func New(cfg *config.Config, useMock bool) (*Server, error) {
 	agg := aggregator.New(cfg.Thresholds)
 	not := notifier.New(cfg.Notifications.Email)
+
+	embedToken := getenv("EMBED_TOKEN", "")
+	if embedToken == "" {
+		slog.Warn("EMBED_TOKEN not set — /embed endpoint disabled", "component", "auth")
+	}
 
 	secret := getenv("DASHBOARD_SECRET", "")
 	if secret == "" {
@@ -105,19 +121,19 @@ func New(cfg *config.Config, useMock bool) (*Server, error) {
 	if useMock {
 		slog.Warn("mock mode — using fake data, no k8s cluster needed", "component", "server")
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
-			mockMode: true, users: users, secret: secret, oidc: oidcHandler}, nil
+			mockMode: true, users: users, secret: secret, embedToken: embedToken, oidc: oidcHandler}, nil
 	}
 
 	col, err := collector.New()
 	if err != nil {
 		slog.Warn("k8s unavailable — falling back to mock mode", "component", "server", "error", err)
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
-			mockMode: true, users: users, secret: secret, oidc: oidcHandler}, nil
+			mockMode: true, users: users, secret: secret, embedToken: embedToken, oidc: oidcHandler}, nil
 	}
 
 	slog.Info("connected to Kubernetes cluster", "component", "server")
 	return &Server{cfg: cfg, collector: col, aggregator: agg, notifier: not,
-		mockMode: false, users: users, secret: secret, oidc: oidcHandler}, nil
+		mockMode: false, users: users, secret: secret, embedToken: embedToken, oidc: oidcHandler}, nil
 }
 
 // Start runs the initial poll, launches the background poll goroutine,
@@ -126,11 +142,24 @@ func (s *Server) Start() error {
 	s.poll()
 	go s.pollLoop()
 
+	// Read index.html once and substitute {{APP_ENV}} with the environment name.
+	// Defaults to "Development" so local runs and unset deployments are safe.
+	raw, err := os.ReadFile("web/index.html")
+	if err != nil {
+		return fmt.Errorf("reading web/index.html: %w", err)
+	}
+	appEnv := os.Getenv("APP_ENV")
+	if appEnv == "" {
+		appEnv = "Development"
+	}
+	s.indexHTML = bytes.ReplaceAll(raw, []byte("{{APP_ENV}}"), []byte(appEnv))
+
 	mux := http.NewServeMux()
 	// /login is wrapped in RateLimitLogin: a per-IP token bucket that throttles
 	// repeated POST attempts (brute-force credential guessing) without
 	// affecting normal use — see docs/PRODUCTION_READINESS.md §2.1 and the
 	// comment on auth.RateLimitLogin for the exact limits and reasoning.
+	mux.HandleFunc("/embed", auth.HandleEmbed(s.embedToken, s.secret))
 	mux.HandleFunc("/login", auth.RateLimitLogin(auth.HandleLogin(s.users, s.secret)))
 	mux.HandleFunc("/logout", auth.HandleLogout)
 	mux.HandleFunc("/api/summary", s.handleSummary)

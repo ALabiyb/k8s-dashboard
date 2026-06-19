@@ -1,5 +1,10 @@
 package auth
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"context"
 	"crypto/tls"

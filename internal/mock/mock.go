@@ -12,6 +12,11 @@
 // every few polls to simulate real-world churn and trigger state-change alerts.
 package mock
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"math/rand"
 	"time"

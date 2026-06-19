@@ -8,6 +8,11 @@
 // The session token is a base64url-encoded payload signed with HMAC-SHA256.
 package auth
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"context"
 	"crypto/hmac"
@@ -154,7 +159,7 @@ func Middleware(next http.Handler, secret string) http.Handler {
 		// None of these expose cluster data — see metrics.go for what /metrics
 		// actually returns (operational counters only, no namespace/pod detail),
 		// and handleMode (handlers.go) for /api/mode (just a {"mock": bool} flag).
-		if p == "/login" || p == "/logout" || p == "/healthz" || p == "/readyz" || p == "/metrics" || p == "/api/mode" || p == "/auth/login" || p == "/auth/callback" {
+		if p == "/login" || p == "/logout" || p == "/embed" || p == "/healthz" || p == "/readyz" || p == "/metrics" || p == "/api/mode" || p == "/auth/login" || p == "/auth/callback" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -246,6 +251,52 @@ func HandleLogin(users []User, secret string) http.HandlerFunc {
 		default:
 			http.NotFound(w, r)
 		}
+	}
+}
+
+// HandleEmbed validates a static embed token and issues a viewer session cookie
+// with SameSite=None so cross-site iframes (e.g. a TV wall display) can carry
+// it on subsequent requests. The token must be set via the EMBED_TOKEN env var;
+// if embedToken is empty, the handler returns 404.
+//
+// Usage: point an iframe at /embed?token=<EMBED_TOKEN>. The handler sets the
+// session cookie and redirects to / — the iframe then behaves like a logged-in
+// viewer for the lifetime of the session.
+// HandleEmbed validates a static embed token and issues a viewer session cookie
+// so cross-origin iframes (e.g. a TV wall display) can stay authenticated.
+//
+// Cookie strategy depends on how the request arrives:
+//   - HTTPS (through Istio/gateway, X-Forwarded-Proto: https): SameSite=None + Secure
+//     — required for cross-domain iframe embedding
+//   - HTTP (NodePort direct access from TV, no TLS): SameSite=Lax, no Secure
+//     — works because the TV page and this service share the same host IP,
+//       making them "same-site" even on different ports; Secure would silently
+//       drop the cookie over plain HTTP
+func HandleEmbed(embedToken, secret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if embedToken == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if !hmac.Equal([]byte(r.URL.Query().Get("token")), []byte(embedToken)) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		https := r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil
+		sameSite := http.SameSiteLaxMode
+		if https {
+			sameSite = http.SameSiteNoneMode
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookieName,
+			Value:    createToken("kiosk", RoleViewer, secret),
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   https,
+			SameSite: sameSite,
+			MaxAge:   int(sessionDuration.Seconds()),
+		})
+		http.Redirect(w, r, "/", http.StatusFound)
 	}
 }
 

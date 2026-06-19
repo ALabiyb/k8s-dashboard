@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o k8s-dashboard ./cmd/server
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────
 FROM alpine:3.21
 
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S -g 1001 appgroup && adduser -S -u 1001 -G appgroup appuser
 
 WORKDIR /app
 

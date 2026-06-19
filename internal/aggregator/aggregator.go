@@ -4,6 +4,11 @@
 // If you want to change how scores are calculated, this is the file to edit.
 package aggregator
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"fmt"
 

@@ -1,5 +1,10 @@
 package api
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"encoding/csv"
 	"encoding/json"
@@ -53,9 +58,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleIndex serves the single-page HTML dashboard.
+// handleIndex serves the single-page HTML dashboard with APP_ENV substituted.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "web/index.html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(s.indexHTML)
 }
 
 // handleExport downloads the current health snapshot as JSON or CSV.
