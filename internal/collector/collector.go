@@ -4,6 +4,11 @@
 // (via the pod's ServiceAccount token) — the same binary handles both.
 package collector
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"context"
 	"fmt"

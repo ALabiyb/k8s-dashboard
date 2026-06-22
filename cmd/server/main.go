@@ -1,6 +1,11 @@
 // main.go is the entrypoint for the k8s-dashboard binary.
 package main
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"flag"
 	"log/slog"

@@ -4,6 +4,11 @@
 // Sender implementation here and wire it up in main.go.
 package notifier
 
+// ---------------------------------------------------------------------------
+// Author: Labiyb M. Said — DevSecOps Engineer
+// Contact: abdulmunimsaid82@gmail.com
+// ---------------------------------------------------------------------------
+
 import (
 	"bytes"
 	"fmt"
