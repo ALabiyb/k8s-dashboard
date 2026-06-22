@@ -14,6 +14,7 @@ package auth
 // ---------------------------------------------------------------------------
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -24,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -213,10 +215,24 @@ func LoginStats() (successTotal, failureTotal int64) {
 
 // HandleLogin serves GET /login (the login page) and processes POST /login (credentials).
 func HandleLogin(users []User, secret string) http.HandlerFunc {
+	// Read login.html once and substitute {{APP_ENV}} with the environment
+	// name (Development / Production) from the env var. Same pattern used for
+	// index.html in api.Server. Defaults to "Development" if APP_ENV is unset.
+	loginHTML, err := os.ReadFile("web/login.html")
+	if err != nil {
+		slog.Error("could not read web/login.html — login page will 500", "error", err)
+	}
+	appEnv := os.Getenv("APP_ENV")
+	if appEnv == "" {
+		appEnv = "Development"
+	}
+	loginHTML = bytes.ReplaceAll(loginHTML, []byte("{{APP_ENV}}"), []byte(appEnv))
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			http.ServeFile(w, r, "web/login.html")
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(loginHTML)
 		case http.MethodPost:
 			ip := clientIP(r)
 			if err := r.ParseForm(); err != nil {
