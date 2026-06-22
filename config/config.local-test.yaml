@@ -1,0 +1,58 @@
+# ──────────────────────────────────────────────
+# k8s-dashboard configuration
+# Edit this file to change thresholds, SMTP, etc.
+# ──────────────────────────────────────────────
+
+server:
+  port: 8099          # Port the dashboard web server listens on
+  poll_interval: 30s  # How often to re-check all namespaces
+
+# Namespaces to SKIP (system namespaces you don't want shown)
+excluded_namespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - k8s-dashboard      # exclude our own namespace
+  - metallb-system
+  - rook-ceph
+  - default
+  - cilium-secrets
+  - cert-manager
+
+# Keycloak / OIDC single sign-on
+# The client secret MUST be set via the OIDC_CLIENT_SECRET environment variable
+# (or a Kubernetes Secret) — never put a real secret in this file.
+# Note: use %20 for any spaces in the realm name in issuer_url.
+oidc:
+  enabled: false
+  issuer_url: "https://keycloak.devops.softnethq.co.tz/realms/k8s%20dashboard"
+  client_id: "k8s-dashboard"
+  client_secret: ""                              # set via OIDC_CLIENT_SECRET env var
+  redirect_url: "http://localhost:8099/auth/callback"
+  admin_role: "dashboard-admin"
+  viewer_role: "dashboard-viewer"
+  # Set true only when Keycloak uses an internal/self-signed CA not in the OS trust store.
+  # DO NOT use in production with public CAs — disables certificate validation.
+  tls_skip_verify: true
+
+# Health score thresholds (percentage of healthy services)
+thresholds:
+  healthy: 100    # 100%        → green
+  degraded: 70    # 70–99%      → amber/yellow
+                  # below 70%   → red/critical
+
+# Email notification settings
+notifications:
+  email:
+    enabled: false
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_username: "you@gmail.com"
+    smtp_password: "your-app-password"   # use an app password, not your real password
+    from: "k8s-dashboard@yourorg.com"
+    to:
+      - "team@yourorg.com"
+      - "oncall@yourorg.com"
+    # Only send email when health STATE changes (green→amber, amber→red, etc.)
+    # This prevents spam on every poll cycle
+    on_state_change_only: true
