@@ -72,7 +72,64 @@ RBAC, all run/deploy instructions, and the CI/CD → ArgoCD pipeline. **Start he
 list of what to harden before exposing to real users (secrets, TLS, audit
 logging, RBAC review, and more).
 
-## TV Wall Display — Embed Token
+## TV Wall Display — `/tv` kiosk mode (recommended)
+
+The `/tv` endpoint serves the dashboard with **no authentication required** —
+no login form, no cookie, no token. The TV iframe just hits
+`http://<host>/tv/` and the dashboard renders with public read-only data.
+
+### How it works
+
+```
+iframe → GET /tv/                       ← serves the SPA (HTML + JS)
+       → GET /tv/me        → {"role":"viewer","username":"tv"}
+       → GET /tv/mode      → {"mock":false}
+       → GET /tv/summary   → cluster health JSON
+```
+
+The SPA is the same `index.html` used for the authenticated dashboard. The
+JS detects `window.location.pathname.startsWith('/tv')` at load time and
+swaps every `fetch('/api/...')` for `fetch('/tv/...')`. The `/tv/*` routes
+are exempt from the auth middleware (see `auth.Middleware` bypass list in
+`internal/auth/auth.go`) and only ever return safe, read-only data.
+
+### Why `/tv` and not `/embed?token=...`
+
+The original embed-token approach set a `SameSite=Lax` session cookie. Modern
+browsers block third-party cookies in cross-port iframes by default — so
+after the initial load, subsequent `/api/summary` polls lost the cookie,
+hit a `302 → /login`, and the JSON parser failed on the HTML response
+(`Unexpected token '<', '<!DOCTYPE'... is not valid JSON`).
+
+`/tv` avoids all of this: no cookie at all. No login redirect possible. Works
+identically across Chrome, Firefox, Safari, and any TV kiosk browser.
+
+### Security stance
+
+- The TV server (`192.168.200.78`) is on the internal LAN — not exposed to
+  the internet.
+- `/tv/*` endpoints only return health data (namespace names, pod counts,
+  health status). No secrets, no node IPs, no credentials.
+- No POST endpoints exist under `/tv/` — read-only by construction.
+- If you ever expose this externally, gate `/tv/*` by source IP at the
+  Gateway/Ingress layer.
+
+### Setting up the TV iframe
+
+```html
+<iframe src="http://192.168.200.78:9095/tv/"></iframe>
+```
+
+That's it. No token, no secret to rotate, no Keycloak client to configure.
+
+---
+
+## TV Wall Display — Embed Token (deprecated)
+
+> **Deprecated:** The `/embed?token=…` endpoint still works for backwards
+> compatibility but is no longer used by the SoftNet TV wall. Prefer the
+> `/tv` kiosk mode above — it's simpler, has no cookie issues in iframes,
+> and requires no token management.
 
 The `/embed` endpoint lets a kiosk (e.g. a Samsung TV) load the dashboard in
 an iframe without a username/password. A static secret token is validated
