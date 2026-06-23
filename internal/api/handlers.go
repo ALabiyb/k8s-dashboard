@@ -64,6 +64,18 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write(s.indexHTML)
 }
 
+// handleTVMe returns a fixed kiosk identity for the no-auth TV mode. The
+// frontend uses it only to populate the header chip and to hide admin
+// affordances — never as a security check (the real check is which endpoints
+// the kiosk path is allowed to hit, which is enforced server-side).
+func (s *Server) handleTVMe(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"username": "tv",
+		"role":     "viewer",
+	})
+}
+
 // handleExport downloads the current health snapshot as JSON or CSV.
 // Protected by RequireAdmin — viewers receive HTTP 403.
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {

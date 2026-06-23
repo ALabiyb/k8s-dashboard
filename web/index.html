@@ -566,6 +566,13 @@
 <script>
   const REFRESH_MS = 30_000;
 
+  // API_BASE: '/api' for normal authenticated sessions, '/tv' for the kiosk
+  // dashboard mode (public read-only endpoints, no login required). The TV
+  // page is served at /tv on the same backend; the JS detects the path it
+  // was loaded under and picks the matching read-only endpoints.
+  const API_BASE = location.pathname.startsWith('/tv') ? '/tv' : '/api';
+  const TV_MODE  = API_BASE === '/tv';
+
   let currentRole        = null;
   let currentUser        = null;
   let signInAt           = null;
@@ -590,7 +597,7 @@
   // See docs/ARCHITECTURE.md §4.2 for the full admin-vs-viewer breakdown.
   async function loadUser() {
     try {
-      const res = await fetch('/api/me');
+      const res = await fetch(API_BASE + '/me');
       if (!res.ok) return;
       const { username, role } = await res.json();
       currentRole = role;
@@ -641,7 +648,7 @@
   // ── Mock mode banner ───────────────────────────────────────────────
   async function checkMode() {
     try {
-      const res  = await fetch('/api/mode');
+      const res  = await fetch(API_BASE + '/mode');
       const data = await res.json();
       document.getElementById('mock-banner').style.display = data.mock ? 'flex' : 'none';
     } catch(_) {}
@@ -665,7 +672,7 @@
     sub.textContent = 'Refreshing…';
     sub.classList.add('checking');
     try {
-      const res = await fetch('/api/summary');
+      const res = await fetch(API_BASE + '/summary');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       currentSummaryData = data;
@@ -942,7 +949,7 @@
   async function exportData(format) {
     document.getElementById('export-menu').style.display = 'none';
     try {
-      const res = await fetch(`/api/export?format=${format}`);
+      const res = await fetch(`${API_BASE}/export?format=${format}`);
       if (res.status === 403) { showError('Export requires admin role.'); return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();

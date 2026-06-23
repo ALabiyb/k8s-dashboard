@@ -166,6 +166,17 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/mode", s.handleMode)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/export", auth.RequireAdmin(s.handleExport))
+
+	// ── TV kiosk mode (no auth) ───────────────────────────────────────────
+	// Public read-only endpoints for the kiosk display. No login, no cookie,
+	// no third-party-cookie issues in iframes. The TV server lives on the
+	// internal LAN — if exposing externally, gate by source IP.
+	// /tv serves the same dashboard HTML; JS detects the path and switches
+	// to /tv/* endpoints instead of /api/*.
+	mux.HandleFunc("/tv", s.handleIndex)
+	mux.HandleFunc("/tv/summary", s.handleSummary)
+	mux.HandleFunc("/tv/mode", s.handleMode)
+	mux.HandleFunc("/tv/me", s.handleTVMe)
 	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		http.ServeFile(w, r, "web/favicon.svg")

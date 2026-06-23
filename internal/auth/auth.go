@@ -165,6 +165,13 @@ func Middleware(next http.Handler, secret string) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// /tv/* paths — TV kiosk mode, public read-only. No cluster mutation
+		// is possible here (no /tv/export, no POSTs). The TV server is on the
+		// internal LAN so this is safe; if exposing externally, gate by source IP.
+		if p == "/tv" || strings.HasPrefix(p, "/tv/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		cookie, err := r.Cookie(cookieName)
 		if err != nil || cookie.Value == "" {
 			http.Redirect(w, r, "/login", http.StatusFound)
