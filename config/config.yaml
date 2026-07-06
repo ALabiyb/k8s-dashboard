@@ -23,14 +23,23 @@ excluded_namespaces:
 # The client secret MUST be set via the OIDC_CLIENT_SECRET environment variable
 # (or a Kubernetes Secret) — never put a real secret in this file.
 # Note: use %20 for any spaces in the realm name in issuer_url.
+#
+# Access model (Path B — RBAC via SoftNet AD groups):
+#   - Users log in via the `SoftNet AD` realm and the `k8s-dashboard` client.
+#   - The client injects `k8s` into the token audience (Audience mapper), so
+#     the same access token is later accepted by the K8s API for per-user
+#     RBAC — see Obsidian: "K8s Dashboard OIDC RBAC Migration".
+#   - Dashboard *role* (admin vs. viewer) is decided from the user's groups:
+#       admin_group present in user.groups   → admin  (export, delete, etc.)
+#       any other k8s-* group                → viewer (read-only, filtered by NS)
+#       no k8s-* group                       → access_denied
 oidc:
   enabled: true
-  issuer_url: "https://keycloak.devops.softnethq.co.tz/realms/k8s%20dashboard"
+  issuer_url: "https://keycloak.devops.softnethq.co.tz/realms/SoftNet%20AD"
   client_id: "k8s-dashboard"
   client_secret: ""                              # set via OIDC_CLIENT_SECRET env var
-  redirect_url: "http://localhost:8099/auth/callback"
-  admin_role: "dashboard-admin"
-  viewer_role: "dashboard-viewer"
+  redirect_url: "http://localhost:8099/auth/callback"  # override with OIDC_REDIRECT_URL
+  admin_group: "k8s-cluster-admins"
   # Set true only when Keycloak uses an internal/self-signed CA not in the OS trust store.
   # DO NOT use in production with public CAs — disables certificate validation.
   tls_skip_verify: true

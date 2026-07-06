@@ -18,10 +18,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -47,9 +44,15 @@ type User struct {
 }
 
 // Claims is the identity extracted from a valid session cookie.
+//
+// Groups is the raw list of Keycloak groups the user belonged to at login
+// time (empty for local username/password logins). Used by the API layer
+// to filter cluster data down to the namespaces the user is allowed to
+// see — see internal/auth/groups.go.
 type Claims struct {
 	Username string
 	Role     string
+	Groups   []string
 }
 
 type claimsKey struct{}
@@ -70,57 +73,9 @@ func GenerateSecret() string {
 	return hex.EncodeToString(b)
 }
 
-func sign(payload, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(payload))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// createToken encodes a signed, expiring session token for the given user.
-// Format: base64url(username NUL role NUL expiry_unix) "." hmac_hex
-//
-// This is a deliberately minimal hand-rolled format rather than a JWT: no
-// library, no JSON, no algorithm-confusion surface — just three NUL-delimited
-// fields (usernames/roles can't contain NUL, so this can't be ambiguously
-// parsed) and an HMAC over the whole payload. The server is the only verifier,
-// so there's nothing to gain from a standardized, third-party-interoperable
-// format.
-func createToken(username, role, secret string) string {
-	exp := fmt.Sprintf("%d", time.Now().Add(sessionDuration).Unix())
-	raw := username + "\x00" + role + "\x00" + exp
-	payload := base64.RawURLEncoding.EncodeToString([]byte(raw))
-	return payload + "." + sign(payload, secret)
-}
-
-// parseToken verifies the signature and expiry, returning claims if valid.
-func parseToken(token, secret string) (*Claims, bool) {
-	dot := strings.LastIndex(token, ".")
-	if dot < 0 {
-		return nil, false
-	}
-	payload, sig := token[:dot], token[dot+1:]
-
-	// Constant-time MAC verification
-	if !hmac.Equal([]byte(sign(payload, secret)), []byte(sig)) {
-		return nil, false
-	}
-
-	raw, err := base64.RawURLEncoding.DecodeString(payload)
-	if err != nil {
-		return nil, false
-	}
-	parts := strings.SplitN(string(raw), "\x00", 3)
-	if len(parts) != 3 {
-		return nil, false
-	}
-
-	var exp int64
-	fmt.Sscanf(parts[2], "%d", &exp)
-	if time.Now().Unix() > exp {
-		return nil, false
-	}
-	return &Claims{Username: parts[0], Role: parts[1]}, true
-}
+// (Session lookup and creation live in session.go — this file no longer
+// signs or parses cookie payloads. Cookies contain only the opaque session
+// ID emitted by SessionStore.)
 
 // checkCredentials validates username/password using constant-time comparison.
 // Iterates all users unconditionally to prevent timing side-channels.
@@ -142,7 +97,11 @@ func checkCredentials(users []User, username, password string) *User {
 
 // Middleware wraps handler, redirecting unauthenticated requests to /login
 // and injecting validated Claims into the request context.
-func Middleware(next http.Handler, secret string) http.Handler {
+//
+// The cookie carries only the opaque session ID emitted by store.Create();
+// the actual identity + tokens live in store. This lets us hold OIDC access
+// and refresh tokens without shipping them to the browser on every request.
+func Middleware(next http.Handler, store *SessionStore) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		// Routes that must stay reachable WITHOUT a session cookie:
@@ -177,20 +136,34 @@ func Middleware(next http.Handler, secret string) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
-		claims, ok := parseToken(cookie.Value, secret)
-		if !ok {
-			// Bad signature, malformed token, or expired — clear the stale
-			// cookie so the browser doesn't keep resending it on every request.
+		sess := store.Get(cookie.Value)
+		if sess == nil {
+			// Unknown id, or session expired / GC'd (or the process
+			// restarted and lost all sessions). Clear the stale cookie so
+			// the browser doesn't keep resending it on every request.
 			clearSession(w)
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
+		claims := &Claims{Username: sess.Username, Role: sess.Role, Groups: sess.Groups}
 		// claimsKey{} is an unexported empty struct used purely as a context
 		// key — guarantees no collision with keys set by other packages
 		// (string keys can collide; typed empty-struct keys can't).
 		ctx := context.WithValue(r.Context(), claimsKey{}, claims)
+		// Also stash the session ID so handlers that need to reach the
+		// Session (for access tokens, refresh, etc.) can call SessionIDFrom.
+		ctx = context.WithValue(ctx, sessionIDKey{}, cookie.Value)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+type sessionIDKey struct{}
+
+// SessionIDFrom returns the opaque session ID stashed by Middleware, or ""
+// when the request is not authenticated (e.g. /tv/*, /healthz).
+func SessionIDFrom(r *http.Request) string {
+	id, _ := r.Context().Value(sessionIDKey{}).(string)
+	return id
 }
 
 // RequireAdmin returns HTTP 403 if the authenticated user's role is not admin.
@@ -221,7 +194,7 @@ func LoginStats() (successTotal, failureTotal int64) {
 }
 
 // HandleLogin serves GET /login (the login page) and processes POST /login (credentials).
-func HandleLogin(users []User, secret string) http.HandlerFunc {
+func HandleLogin(users []User, store *SessionStore) http.HandlerFunc {
 	// Read login.html once and substitute {{APP_ENV}} with the environment
 	// name (Development / Production) from the env var. Same pattern used for
 	// index.html in api.Server. Defaults to "Development" if APP_ENV is unset.
@@ -262,9 +235,14 @@ func HandleLogin(users []User, secret string) http.HandlerFunc {
 			loginSuccessTotal.Add(1)
 			slog.Info("login succeeded", "component", "auth", "event", "login_success",
 				"username", user.Username, "role", user.Role, "remote_addr", ip)
+			sessionID := store.Create(&Session{
+				Username:  user.Username,
+				Role:      user.Role,
+				ExpiresAt: time.Now().Add(sessionDuration),
+			})
 			http.SetCookie(w, &http.Cookie{
 				Name:     cookieName,
-				Value:    createToken(user.Username, user.Role, secret),
+				Value:    sessionID,
 				Path:     "/",
 				HttpOnly: true,
 				SameSite: http.SameSiteLaxMode,
@@ -295,7 +273,7 @@ func HandleLogin(users []User, secret string) http.HandlerFunc {
 //     — works because the TV page and this service share the same host IP,
 //       making them "same-site" even on different ports; Secure would silently
 //       drop the cookie over plain HTTP
-func HandleEmbed(embedToken, secret string) http.HandlerFunc {
+func HandleEmbed(embedToken string, store *SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if embedToken == "" {
 			http.NotFound(w, r)
@@ -310,9 +288,14 @@ func HandleEmbed(embedToken, secret string) http.HandlerFunc {
 		if https {
 			sameSite = http.SameSiteNoneMode
 		}
+		sessionID := store.Create(&Session{
+			Username:  "kiosk",
+			Role:      RoleViewer,
+			ExpiresAt: time.Now().Add(sessionDuration),
+		})
 		http.SetCookie(w, &http.Cookie{
 			Name:     cookieName,
-			Value:    createToken("kiosk", RoleViewer, secret),
+			Value:    sessionID,
 			Path:     "/",
 			HttpOnly: true,
 			Secure:   https,
@@ -323,13 +306,21 @@ func HandleEmbed(embedToken, secret string) http.HandlerFunc {
 	}
 }
 
-// HandleLogout clears the session cookie and redirects to /login.
-func HandleLogout(w http.ResponseWriter, r *http.Request) {
-	if c := GetClaims(r); c != nil {
-		slog.Info("logout", "component", "auth", "event", "logout", "username", c.Username)
+// HandleLogout clears the session cookie, deletes the server-side session,
+// and redirects to /login. store may be nil in tests / mock harnesses.
+func HandleLogout(store *SessionStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if c := GetClaims(r); c != nil {
+			slog.Info("logout", "component", "auth", "event", "logout", "username", c.Username)
+		}
+		if store != nil {
+			if id := SessionIDFrom(r); id != "" {
+				store.Delete(id)
+			}
+		}
+		clearSession(w)
+		http.Redirect(w, r, "/login", http.StatusFound)
 	}
-	clearSession(w)
-	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
 // clientIP extracts the request's source IP for audit-logging and rate-

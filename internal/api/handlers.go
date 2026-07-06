@@ -6,20 +6,37 @@ package api
 // ---------------------------------------------------------------------------
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 
-	"github.com/yourorg/k8s-dashboard/internal/auth"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ALabiyb/k8s-dashboard/internal/aggregator"
+	"github.com/ALabiyb/k8s-dashboard/internal/auth"
+	"github.com/ALabiyb/k8s-dashboard/internal/k8s"
 )
 
-// handleSummary serves the current health summary as JSON.
+// handleSummary serves the current health summary as JSON, filtered by the
+// caller's Keycloak groups so users only see namespaces their K8s RBAC
+// allows.
 //
-// Note this is identical for every role — admin and viewer both get the full
-// Summary including per-pod detail. Nothing is filtered server-side by role;
-// the only role-based differences are *capabilities* (export, drill-down UI),
-// not *data visibility*. See docs/ARCHITECTURE.md §4.2 for the full picture.
+// Filtering rules (see internal/auth/groups.go and the "K8s Dashboard OIDC
+// RBAC Migration" runbook):
+//
+//	admin group / k8s-managers-view → full cluster view (no filter)
+//	k8s-<ns>-edit or k8s-<ns>-view  → only that namespace
+//	no session (TV kiosk path)      → full cluster view — the TV is a public
+//	                                  overview and shouldn't hide anything
+//	no k8s-* group                  → empty view (Products list empty)
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	// Read the cached summary under a read-lock — it's overwritten wholesale
 	// by poll() (in poll.go) every poll_interval from a different goroutine,
@@ -27,6 +44,15 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	summary := s.summary
 	s.mu.RUnlock()
+
+	// Only filter when the caller is an OIDC-authenticated user (identified by
+	// a non-empty Groups list). Local username/password logins carry no
+	// groups and keep the historical "see everything" behavior — same as
+	// pre-migration. The TV kiosk path has no claims at all and skips this
+	// block entirely.
+	if claims := auth.GetClaims(r); claims != nil && len(claims.Groups) > 0 {
+		summary = filterSummaryForUser(summary, claims.Groups, s.oidcAdminGroup)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	// Short client-side cache: smooths out bursts of near-simultaneous
@@ -38,23 +64,60 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// filterSummaryForUser returns a Summary containing only the namespaces the
+// user's groups grant access to, and re-derives the top-bar service counts
+// from that filtered view. When the user has cluster-wide access, the input
+// is returned unchanged.
+func filterSummaryForUser(full aggregator.Summary, userGroups []string, adminGroup string) aggregator.Summary {
+	allowAll, allowed := auth.AllowedNamespaces(userGroups, adminGroup)
+	if allowAll {
+		return full
+	}
+	out := aggregator.Summary{}
+	for _, p := range full.Products {
+		if !allowed[p.Namespace] {
+			continue
+		}
+		out.Products = append(out.Products, p)
+		for _, svc := range p.Services {
+			out.TotalServices++
+			switch svc.Status {
+			case "Healthy":
+				out.HealthyServices++
+			case "Degraded":
+				out.DegradedServices++
+			case "Unhealthy":
+				out.UnhealthyServices++
+			}
+		}
+	}
+	return out
+}
+
 // handleMode tells the frontend whether we're in mock or real mode.
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"mock": s.mockMode})
 }
 
-// handleMe returns the authenticated user's username and role as JSON.
+// handleMe returns the authenticated user's username, role, and (for OIDC
+// logins) the raw Keycloak groups so the frontend can render affordances
+// gated by group membership. Groups is an empty array for local logins.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	claims := auth.GetClaims(r)
 	if claims == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	groups := claims.Groups
+	if groups == nil {
+		groups = []string{} // encode as [], not null
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	json.NewEncoder(w).Encode(map[string]any{
 		"username": claims.Username,
 		"role":     claims.Role,
+		"groups":   groups,
 	})
 }
 
@@ -111,4 +174,251 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		enc.SetIndent("", "  ")
 		enc.Encode(summary)
 	}
+}
+
+// handlePodList returns the pods in a namespace that match one of the
+// well-known owner labels used by the collector (`app.kubernetes.io/name`,
+// `app`, `name`). The frontend uses this to resolve a Deployment/StatefulSet
+// name to the actual pod name(s) it should stream logs from.
+//
+// Route:  GET /api/pods/{ns}/list?owner=<deployment-or-statefulset-name>
+//
+// Authorization: enforced by K8s RBAC via the user's OIDC token.
+func (s *Server) handlePodList(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("ns")
+	owner := r.URL.Query().Get("owner")
+	if ns == "" || owner == "" {
+		http.Error(w, "namespace and owner required", http.StatusBadRequest)
+		return
+	}
+	if s.mockMode {
+		http.Error(w, "pod listing unavailable in mock mode", http.StatusServiceUnavailable)
+		return
+	}
+	if s.oidc == nil {
+		http.Error(w, "requires OIDC session", http.StatusForbidden)
+		return
+	}
+	sessionID := auth.SessionIDFrom(r)
+	if sessionID == "" {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	token, err := s.oidc.ValidAccessToken(r.Context(), sessionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrNoOIDCSession):
+			http.Error(w, "not an OIDC session", http.StatusForbidden)
+		case errors.Is(err, auth.ErrRefreshFailed):
+			http.Error(w, "session expired", http.StatusUnauthorized)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	cs, err := k8s.ForUser(token)
+	if err != nil {
+		http.Error(w, "cannot build k8s client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Try each label key the collector understands, in the same order.
+	// First match wins — most workloads use exactly one convention.
+	var pods []corev1.Pod
+	for _, key := range []string{"app.kubernetes.io/name", "app", "name"} {
+		list, err := cs.CoreV1().Pods(ns).List(r.Context(), metaListOpts(key+"="+owner))
+		if err != nil {
+			writeK8sError(w, err, ns, owner)
+			return
+		}
+		if len(list.Items) > 0 {
+			pods = list.Items
+			break
+		}
+	}
+
+	type podLite struct {
+		Name       string   `json:"name"`
+		Phase      string   `json:"phase"`
+		Containers []string `json:"containers"`
+	}
+	out := make([]podLite, 0, len(pods))
+	for _, p := range pods {
+		names := make([]string, 0, len(p.Spec.Containers))
+		for _, c := range p.Spec.Containers {
+			names = append(names, c.Name)
+		}
+		out = append(out, podLite{
+			Name:       p.Name,
+			Phase:      string(p.Status.Phase),
+			Containers: names,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// metaListOpts wraps a labelSelector in the metav1.ListOptions shape without
+// pulling metav1 into every file that touches it.
+func metaListOpts(labelSelector string) metav1.ListOptions {
+	return metav1.ListOptions{LabelSelector: labelSelector}
+}
+
+// handlePodLogs streams container logs for a specific pod.
+//
+// Route (Go 1.22+ path patterns):
+//
+//	GET /api/pods/{ns}/{name}/logs
+//
+// Query parameters:
+//
+//	container   optional; first container if omitted
+//	tail        optional int; last N lines (default 200)
+//	follow      optional bool; keeps streaming new lines until the client disconnects
+//	previous    optional bool; logs of the last terminated container (for crash debugging)
+//
+// Authorization: enforced by Kubernetes RBAC via the user's OIDC token.
+// A namespace-editor for softaml calling /api/pods/other-ns/... gets 403
+// from the apiserver, which we surface as a friendly JSON error. There is
+// NO additional server-side namespace filter here — RBAC is authoritative.
+func (s *Server) handlePodLogs(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("ns")
+	name := r.PathValue("name")
+	if ns == "" || name == "" {
+		http.Error(w, "namespace and pod name required", http.StatusBadRequest)
+		return
+	}
+
+	// Mock mode has no real cluster to hit. Explicit refusal beats a
+	// confusing timeout/connection-error later.
+	if s.mockMode {
+		http.Error(w, "log streaming unavailable in mock mode", http.StatusServiceUnavailable)
+		return
+	}
+
+	// OIDC handler is required — logs are gated by RBAC which needs the
+	// user's token. Local username/password sessions have no token and
+	// cannot view logs; return 403 with an explanatory message.
+	if s.oidc == nil {
+		http.Error(w, "log streaming requires OIDC authentication (not available for local sessions)", http.StatusForbidden)
+		return
+	}
+	sessionID := auth.SessionIDFrom(r)
+	if sessionID == "" {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+
+	// Get a valid access token (auto-refresh if the stored one is stale).
+	// If refresh fails the user must re-login through the browser.
+	token, err := s.oidc.ValidAccessToken(r.Context(), sessionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrNoOIDCSession):
+			http.Error(w, "not an OIDC session; sign in via Keycloak", http.StatusForbidden)
+		case errors.Is(err, auth.ErrRefreshFailed):
+			http.Error(w, "session expired; sign in again", http.StatusUnauthorized)
+		default:
+			http.Error(w, "token error: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Build a per-request K8s clientset that authenticates AS the user.
+	// RBAC decisions from here on are made by kube-apiserver.
+	cs, err := k8s.ForUser(token)
+	if err != nil {
+		http.Error(w, "cannot build k8s client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Assemble log options from the query string.
+	q := r.URL.Query()
+	tail := int64(200)
+	if v := q.Get("tail"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			tail = n
+		}
+	}
+	follow := q.Get("follow") == "true" || q.Get("follow") == "1"
+	previous := q.Get("previous") == "true" || q.Get("previous") == "1"
+
+	opts := &corev1.PodLogOptions{
+		Container: q.Get("container"),
+		Follow:    follow,
+		Previous:  previous,
+	}
+	if tail > 0 {
+		opts.TailLines = &tail
+	}
+
+	// Follow=true streams may run for minutes. Cancel the request context
+	// as soon as the client disconnects so we don't leak the goroutine
+	// blocking on Read.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	req := cs.CoreV1().Pods(ns).GetLogs(name, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		writeK8sError(w, err, ns, name)
+		return
+	}
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering if fronted by one
+	w.WriteHeader(http.StatusOK)
+
+	// Flush after every read so the browser sees log lines as they arrive
+	// (not batched into a single big response at the end).
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := stream.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return // client disconnected
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				slog.WarnContext(ctx, "pod log stream error",
+					"component", "api", "ns", ns, "pod", name, "error", readErr)
+			}
+			return
+		}
+	}
+}
+
+// writeK8sError maps common Kubernetes API errors to appropriate HTTP
+// responses. RBAC denials show up as 403 with a body the frontend can
+// display verbatim; missing pods show up as 404; anything else is a 502
+// (upstream problem) with a redacted-ish message.
+func writeK8sError(w http.ResponseWriter, err error, ns, name string) {
+	msg := err.Error()
+	switch {
+	case containsAny(msg, "forbidden", "cannot get resource"):
+		http.Error(w, fmt.Sprintf("access denied for %s/%s (RBAC)", ns, name), http.StatusForbidden)
+	case containsAny(msg, "not found", "NotFound"):
+		http.Error(w, fmt.Sprintf("pod %s/%s not found", ns, name), http.StatusNotFound)
+	case containsAny(msg, "unauthorized", "Unauthorized"):
+		http.Error(w, "authentication rejected by apiserver", http.StatusUnauthorized)
+	default:
+		http.Error(w, "kubernetes error: "+msg, http.StatusBadGateway)
+	}
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }

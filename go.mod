@@ -1,4 +1,4 @@
-module github.com/yourorg/k8s-dashboard
+module github.com/ALabiyb/k8s-dashboard
 
 go 1.25.0
 

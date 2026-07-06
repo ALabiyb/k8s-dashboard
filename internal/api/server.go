@@ -36,13 +36,14 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
-	"github.com/yourorg/k8s-dashboard/config"
-	"github.com/yourorg/k8s-dashboard/internal/aggregator"
-	"github.com/yourorg/k8s-dashboard/internal/auth"
-	"github.com/yourorg/k8s-dashboard/internal/collector"
-	"github.com/yourorg/k8s-dashboard/internal/mock"
-	"github.com/yourorg/k8s-dashboard/internal/notifier"
+	"github.com/ALabiyb/k8s-dashboard/config"
+	"github.com/ALabiyb/k8s-dashboard/internal/aggregator"
+	"github.com/ALabiyb/k8s-dashboard/internal/auth"
+	"github.com/ALabiyb/k8s-dashboard/internal/collector"
+	"github.com/ALabiyb/k8s-dashboard/internal/mock"
+	"github.com/ALabiyb/k8s-dashboard/internal/notifier"
 )
 
 // Server holds everything the HTTP handlers and poll loop need.
@@ -53,10 +54,12 @@ type Server struct {
 	aggregator *aggregator.Aggregator
 	notifier   *notifier.Notifier
 	mockMode   bool
-	users      []auth.User
-	secret     string
-	embedToken string
-	oidc       *auth.OIDCHandler // nil when OIDC is disabled in config
+	users          []auth.User
+	secret         string
+	embedToken     string
+	sessions       *auth.SessionStore // owns all logged-in user sessions
+	oidc           *auth.OIDCHandler  // nil when OIDC is disabled in config
+	oidcAdminGroup string             // Keycloak group whose members become dashboard admins
 
 	// mu protects summary/ready so the poll goroutine and handlers can share
 	// them safely — poll() writes from a background goroutine, handlers read
@@ -104,7 +107,12 @@ func New(cfg *config.Config, useMock bool) (*Server, error) {
 	}
 	slog.Info("accounts configured", "component", "auth", "admin_user", adminUser, "viewer_user", viewerUser)
 
-	oidcHandler, err := auth.NewOIDCHandler(cfg.OIDC, secret)
+	sessions := auth.NewSessionStore()
+	// GC expired sessions every 15 minutes. Cheap; keeps the map bounded even
+	// if users close their browsers without logging out.
+	sessions.StartGC(15 * time.Minute)
+
+	oidcHandler, err := auth.NewOIDCHandler(cfg.OIDC, sessions)
 	if err != nil {
 		// OIDC init failure is non-fatal: log a warning and continue with local
 		// credentials only. This lets the server start even when Keycloak is
@@ -121,19 +129,22 @@ func New(cfg *config.Config, useMock bool) (*Server, error) {
 	if useMock {
 		slog.Warn("mock mode — using fake data, no k8s cluster needed", "component", "server")
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
-			mockMode: true, users: users, secret: secret, embedToken: embedToken, oidc: oidcHandler}, nil
+			mockMode: true, users: users, secret: secret, embedToken: embedToken,
+			sessions: sessions, oidc: oidcHandler, oidcAdminGroup: cfg.OIDC.AdminGroup}, nil
 	}
 
 	col, err := collector.New()
 	if err != nil {
 		slog.Warn("k8s unavailable — falling back to mock mode", "component", "server", "error", err)
 		return &Server{cfg: cfg, mockCol: mock.New(), aggregator: agg, notifier: not,
-			mockMode: true, users: users, secret: secret, embedToken: embedToken, oidc: oidcHandler}, nil
+			mockMode: true, users: users, secret: secret, embedToken: embedToken,
+			sessions: sessions, oidc: oidcHandler, oidcAdminGroup: cfg.OIDC.AdminGroup}, nil
 	}
 
 	slog.Info("connected to Kubernetes cluster", "component", "server")
 	return &Server{cfg: cfg, collector: col, aggregator: agg, notifier: not,
-		mockMode: false, users: users, secret: secret, embedToken: embedToken, oidc: oidcHandler}, nil
+		mockMode: false, users: users, secret: secret, embedToken: embedToken,
+		oidc: oidcHandler, oidcAdminGroup: cfg.OIDC.AdminGroup}, nil
 }
 
 // Start runs the initial poll, launches the background poll goroutine,
@@ -159,13 +170,21 @@ func (s *Server) Start() error {
 	// repeated POST attempts (brute-force credential guessing) without
 	// affecting normal use — see docs/PRODUCTION_READINESS.md §2.1 and the
 	// comment on auth.RateLimitLogin for the exact limits and reasoning.
-	mux.HandleFunc("/embed", auth.HandleEmbed(s.embedToken, s.secret))
-	mux.HandleFunc("/login", auth.RateLimitLogin(auth.HandleLogin(s.users, s.secret)))
-	mux.HandleFunc("/logout", auth.HandleLogout)
+	mux.HandleFunc("/embed", auth.HandleEmbed(s.embedToken, s.sessions))
+	mux.HandleFunc("/login", auth.RateLimitLogin(auth.HandleLogin(s.users, s.sessions)))
+	mux.HandleFunc("/logout", auth.HandleLogout(s.sessions))
 	mux.HandleFunc("/api/summary", s.handleSummary)
 	mux.HandleFunc("/api/mode", s.handleMode)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/export", auth.RequireAdmin(s.handleExport))
+	// Pod list by owner (Deployment/StatefulSet name), used by the frontend
+	// to resolve a service to the actual pod(s) it should stream logs from.
+	// Registered BEFORE the /logs route because it uses the same {ns}
+	// segment and Go 1.22+ mux prefers the more specific pattern anyway.
+	mux.HandleFunc("GET /api/pods/{ns}/list", s.handlePodList)
+	// Streaming pod logs — authorization is enforced by K8s RBAC through
+	// the user's OIDC token (see internal/k8s/user_client.go).
+	mux.HandleFunc("GET /api/pods/{ns}/{name}/logs", s.handlePodLogs)
 
 	// ── TV kiosk mode (no auth) ───────────────────────────────────────────
 	// Public read-only endpoints for the kiosk display. No login, no cookie,
@@ -202,7 +221,7 @@ func (s *Server) Start() error {
 
 	addr := fmt.Sprintf(":%d", s.cfg.Server.Port)
 	slog.Info("listening", "component", "server", "addr", addr)
-	return http.ListenAndServe(addr, auth.Middleware(mux, s.secret))
+	return http.ListenAndServe(addr, auth.Middleware(mux, s.sessions))
 }
 
 // getenv returns the value of key, or def when the variable is unset or empty.

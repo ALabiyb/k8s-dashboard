@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/yourorg/k8s-dashboard/internal/auth"
+	"github.com/ALabiyb/k8s-dashboard/internal/auth"
 )
 
 // serverMetrics holds plain atomic counters/gauges updated by poll() (see

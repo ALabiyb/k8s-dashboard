@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/yourorg/k8s-dashboard/internal/collector"
+	"github.com/ALabiyb/k8s-dashboard/internal/collector"
 )
 
 // pollLoop runs forever, calling poll() on the configured interval.

@@ -21,7 +21,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/yourorg/k8s-dashboard/internal/collector"
+	"github.com/ALabiyb/k8s-dashboard/internal/collector"
 )
 
 // flappingPool is the pool of services that randomly break/recover between polls.
@@ -161,6 +161,36 @@ var products = []struct {
 		namespace: "catalog",
 		deploys:   []string{"catalog-api", "image-processor", "price-sync"},
 		sts:       []string{"postgres", "redis"},
+	},
+
+	// ── SoftNet project namespaces ────────────────────────────────────────
+	// These mirror real dev-cluster namespaces (see the K8s RBAC Bindings
+	// runbook) so an OIDC login as e.g. `k8s-softaml-edit` in mock mode can
+	// verify that the filter shows only that user's namespace(s).
+	{
+		namespace: "softaml",
+		deploys:   []string{"aml-ingest", "screening-worker", "rules-engine", "case-manager", "reporting-api"},
+		sts:       []string{"postgres", "redis"},
+	},
+	{
+		namespace: "softcms",
+		deploys:   []string{"cms-api", "editor-web", "media-worker", "search-indexer"},
+		sts:       []string{"postgres", "elasticsearch"},
+	},
+	{
+		namespace: "xm113",
+		deploys:   []string{"xm113-orchestrator", "batch-runner", "notify-worker"},
+		sts:       []string{"postgres"},
+	},
+	{
+		namespace: "softid",
+		deploys:   []string{"identity-api", "kyc-verifier", "document-scanner"},
+		sts:       []string{"postgres", "redis"},
+	},
+	{
+		namespace: "soft-guarantee",
+		deploys:   []string{"guarantee-api", "policy-engine", "claims-processor"},
+		sts:       []string{"postgres"},
 	},
 }
 

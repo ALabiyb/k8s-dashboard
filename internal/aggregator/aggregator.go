@@ -12,8 +12,8 @@ package aggregator
 import (
 	"fmt"
 
-	"github.com/yourorg/k8s-dashboard/config"
-	"github.com/yourorg/k8s-dashboard/internal/collector"
+	"github.com/ALabiyb/k8s-dashboard/config"
+	"github.com/ALabiyb/k8s-dashboard/internal/collector"
 )
 
 // HealthLevel is the overall state of a product.

@@ -18,8 +18,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/yourorg/k8s-dashboard/config"
-	"github.com/yourorg/k8s-dashboard/internal/aggregator"
+	"github.com/ALabiyb/k8s-dashboard/config"
+	"github.com/ALabiyb/k8s-dashboard/internal/aggregator"
 )
 
 // Notifier handles sending alerts.

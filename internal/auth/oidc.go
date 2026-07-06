@@ -13,38 +13,39 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/yourorg/k8s-dashboard/config"
+	"github.com/ALabiyb/k8s-dashboard/config"
 )
 
 // OIDCHandler manages the Authorization Code flow against Keycloak.
-// It plugs into the existing session layer via createToken — everything
-// downstream (Middleware, RequireAdmin, /api/me, frontend role gating)
-// is unchanged regardless of whether a session came from local credentials
-// or from Keycloak. See docs/ARCHITECTURE.md §7.3.
+// On a successful callback it creates a Session in the store containing the
+// user's identity and the OIDC access + refresh tokens; the returned cookie
+// holds only the opaque session ID. Middleware (auth.go) is unchanged.
 type OIDCHandler struct {
 	cfg        config.OIDCConfig
 	httpClient *http.Client // custom client (TLS skip or default)
 	verifier   *gooidc.IDTokenVerifier
 	oauth2     oauth2.Config
-	secret     string // dashboard session-signing secret
+	store      *SessionStore // owns session state and OIDC tokens
 }
 
 // NewOIDCHandler initialises the OIDC provider by fetching the discovery
 // document from <issuer_url>/.well-known/openid-configuration.
 // Returns nil, nil when OIDC is disabled — callers must check for nil.
-func NewOIDCHandler(cfg config.OIDCConfig, sessionSecret string) (*OIDCHandler, error) {
+func NewOIDCHandler(cfg config.OIDCConfig, store *SessionStore) (*OIDCHandler, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
 	if cfg.ClientSecret == "" {
 		return nil, fmt.Errorf("OIDC_CLIENT_SECRET env var is not set (required when oidc.enabled = true)")
+	}
+	if store == nil {
+		return nil, fmt.Errorf("OIDC handler requires a non-nil SessionStore")
 	}
 
 	// Build the HTTP client used for the discovery fetch and token exchange.
@@ -83,8 +84,74 @@ func NewOIDCHandler(cfg config.OIDCConfig, sessionSecret string) (*OIDCHandler, 
 			Endpoint:     provider.Endpoint(),
 			Scopes:       []string{gooidc.ScopeOpenID, "profile", "email"},
 		},
-		secret: sessionSecret,
+		store: store,
 	}, nil
+}
+
+// Errors returned by ValidAccessToken.
+var (
+	// ErrNoOIDCSession is returned when the session id is unknown or the
+	// session has no OIDC tokens (e.g. a local username/password login).
+	// K8s handlers should treat it as "not authenticated for K8s" — 401 or
+	// re-redirect to /auth/login.
+	ErrNoOIDCSession = fmt.Errorf("oidc: no OIDC session for id")
+
+	// ErrRefreshFailed is returned when Keycloak refuses the refresh token
+	// (revoked, expired, or the refresh session on Keycloak side is over).
+	// The user must sign in again via the browser.
+	ErrRefreshFailed = fmt.Errorf("oidc: refresh token exchange failed")
+)
+
+// ValidAccessToken returns a non-expired access token for the session,
+// refreshing it via Keycloak if the stored one is stale.
+//
+// If a refresh happens, the new access + refresh tokens are persisted back
+// to the session store so the next call can reuse them without hitting
+// Keycloak again.
+//
+// Handlers should call this immediately before every Kubernetes API request
+// (K8s access tokens typically live ~5 minutes; long-running dashboard
+// sessions absolutely will outlive them).
+func (h *OIDCHandler) ValidAccessToken(ctx context.Context, sessionID string) (string, error) {
+	sess := h.store.Get(sessionID)
+	if sess == nil || sess.AccessToken == "" || sess.RefreshToken == "" {
+		return "", ErrNoOIDCSession
+	}
+
+	// Build an oauth2.Token from what we have and hand it to a TokenSource.
+	// The TokenSource compares Expiry against time.Now() (with a small skew)
+	// and refreshes automatically if needed. Otherwise it returns the same
+	// token back — cheap.
+	tok := &oauth2.Token{
+		AccessToken:  sess.AccessToken,
+		RefreshToken: sess.RefreshToken,
+		Expiry:       sess.TokenExpiry,
+	}
+	// Inject our HTTP client (may skip TLS verify on the internal CA).
+	oauthCtx := gooidc.ClientContext(ctx, h.httpClient)
+	ts := h.oauth2.TokenSource(oauthCtx, tok)
+	newTok, err := ts.Token()
+	if err != nil {
+		slog.Warn("oidc: refresh failed", "component", "auth",
+			"username", sess.Username, "error", err)
+		return "", fmt.Errorf("%w: %v", ErrRefreshFailed, err)
+	}
+
+	// Only touch the store if something actually changed. Reduces mutex
+	// contention on the common "still valid, no refresh needed" path.
+	if newTok.AccessToken != sess.AccessToken || newTok.RefreshToken != sess.RefreshToken {
+		sess.AccessToken = newTok.AccessToken
+		if newTok.RefreshToken != "" {
+			// Keycloak may or may not rotate refresh tokens; only overwrite
+			// when a new one is supplied — never with an empty string.
+			sess.RefreshToken = newTok.RefreshToken
+		}
+		sess.TokenExpiry = newTok.Expiry
+		h.store.Update(sessionID, sess)
+		slog.Debug("oidc: access token refreshed", "component", "auth",
+			"username", sess.Username, "new_expiry", newTok.Expiry)
+	}
+	return newTok.AccessToken, nil
 }
 
 // LoginHandler redirects the browser to the Keycloak authorization endpoint.
@@ -148,12 +215,13 @@ func (h *OIDCHandler) CallbackHandler() http.HandlerFunc {
 		}
 
 		// ── 4. Extract claims ─────────────────────────────────────────────────
+		// We read `groups` (populated by the Keycloak Group Membership mapper
+		// on the k8s-dashboard client, with "Full group path" OFF so entries
+		// are plain names like "k8s-cluster-admins", not "/k8s-cluster-admins").
 		var claims struct {
-			Nonce             string `json:"nonce"`
-			PreferredUsername string `json:"preferred_username"`
-			RealmAccess       struct {
-				Roles []string `json:"roles"`
-			} `json:"realm_access"`
+			Nonce             string   `json:"nonce"`
+			PreferredUsername string   `json:"preferred_username"`
+			Groups            []string `json:"groups"`
 		}
 		if err := idToken.Claims(&claims); err != nil {
 			slog.Error("oidc: cannot parse id_token claims", "component", "auth", "error", err)
@@ -166,46 +234,50 @@ func (h *OIDCHandler) CallbackHandler() http.HandlerFunc {
 			return
 		}
 
-		// ── 5. Map Keycloak realm role → dashboard role ───────────────────────
-		// Keycloak only includes realm_access in the ID token when the client
-		// scope mapper has "Add to ID token" enabled. As a robust fallback, we
-		// also decode the access token payload (trusted: received directly from
-		// Keycloak's token endpoint over TLS) to pick up realm roles even without
-		// that mapper configured.
-		realmRoles := claims.RealmAccess.Roles
-		if len(realmRoles) == 0 {
-			realmRoles = realmRolesFromAccessToken(oauth2Token.AccessToken)
+		// ── 5. Map Keycloak groups → dashboard role ───────────────────────────
+		// If groups aren't in the ID token (mapper not configured with "Add to
+		// ID token"), fall back to decoding the access token — same trust
+		// argument as the previous realm_roles fallback: the access token was
+		// received directly from Keycloak's token endpoint over TLS.
+		groups := claims.Groups
+		if len(groups) == 0 {
+			groups = groupsFromAccessToken(oauth2Token.AccessToken)
 		}
-		slog.Debug("oidc: resolved realm roles", "component", "auth",
-			"username", claims.PreferredUsername, "roles", realmRoles)
+		slog.Debug("oidc: resolved groups", "component", "auth",
+			"username", claims.PreferredUsername, "groups", groups)
 
-		role := ""
-		switch {
-		case slices.Contains(realmRoles, h.cfg.AdminRole):
-			role = RoleAdmin
-		case slices.Contains(realmRoles, h.cfg.ViewerRole):
-			role = RoleViewer
-		}
+		role := roleFromGroups(groups, h.cfg.AdminGroup)
 		if role == "" {
-			slog.Warn("oidc: user authenticated but has no dashboard role assigned",
+			slog.Warn("oidc: user authenticated but has no k8s-* group assigned",
 				"component", "auth",
 				"username", claims.PreferredUsername,
-				"realm_roles", claims.RealmAccess.Roles,
-				"expected_admin", h.cfg.AdminRole,
-				"expected_viewer", h.cfg.ViewerRole,
+				"groups", groups,
+				"expected_admin_group", h.cfg.AdminGroup,
 			)
 			http.Redirect(w, r, "/login?error=access_denied", http.StatusFound)
 			return
 		}
 
-		// ── 6. Mint session cookie (unchanged from local-auth path) ───────────
+		// ── 6. Mint session (server-side; cookie holds only the opaque ID) ────
+		// Store the OIDC access + refresh tokens so K8s-facing handlers can
+		// forward the user's identity to the API server. The refresh token
+		// stays in the store (never sent to the browser).
 		slog.Info("oidc login succeeded", "component", "auth", "event", "oidc_login_success",
-			"username", claims.PreferredUsername, "role", role)
+			"username", claims.PreferredUsername, "role", role, "groups", groups)
 		loginSuccessTotal.Add(1)
 
+		sessionID := h.store.Create(&Session{
+			Username:     claims.PreferredUsername,
+			Role:         role,
+			Groups:       groups,
+			AccessToken:  oauth2Token.AccessToken,
+			RefreshToken: oauth2Token.RefreshToken,
+			TokenExpiry:  oauth2Token.Expiry,
+			ExpiresAt:    time.Now().Add(sessionDuration),
+		})
 		http.SetCookie(w, &http.Cookie{
 			Name:     cookieName,
-			Value:    createToken(claims.PreferredUsername, role, h.secret),
+			Value:    sessionID,
 			Path:     "/",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -236,13 +308,13 @@ func randomToken() string {
 	return GenerateSecret()[:32] // GenerateSecret returns 64 hex chars; 32 is plenty
 }
 
-// realmRolesFromAccessToken decodes the Keycloak access token (a JWT) and
-// returns the roles from the realm_access claim. No signature verification is
-// performed — the token was received directly from Keycloak's token endpoint
-// over TLS, so its origin is already trusted. This is only used as a fallback
-// when the ID token's realm_access claim is absent (i.e. the client scope
-// mapper "Add to ID token" is not enabled in Keycloak).
-func realmRolesFromAccessToken(accessToken string) []string {
+// groupsFromAccessToken decodes the Keycloak access token (a JWT) and returns
+// the `groups` claim. No signature verification is performed — the token was
+// received directly from Keycloak's token endpoint over TLS, so its origin is
+// already trusted. This is only used as a fallback when the ID token's
+// `groups` claim is absent (i.e. the client scope Group Membership mapper
+// does not have "Add to ID token" enabled in Keycloak).
+func groupsFromAccessToken(accessToken string) []string {
 	parts := strings.SplitN(accessToken, ".", 3)
 	if len(parts) != 3 {
 		return nil
@@ -252,12 +324,37 @@ func realmRolesFromAccessToken(accessToken string) []string {
 		return nil
 	}
 	var claims struct {
-		RealmAccess struct {
-			Roles []string `json:"roles"`
-		} `json:"realm_access"`
+		Groups []string `json:"groups"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return nil
 	}
-	return claims.RealmAccess.Roles
+	return claims.Groups
+}
+
+// roleFromGroups maps a user's Keycloak groups to the dashboard's role
+// system:
+//
+//	adminGroup is in groups                → RoleAdmin
+//	any group starts with "k8s-"           → RoleViewer
+//	none of the above                      → "" (access denied)
+//
+// The "k8s-" prefix covers all namespace-scoped groups the platform emits
+// (k8s-<project>-edit, k8s-<project>-view, k8s-managers-view). Users
+// authenticated to Keycloak but with no k8s-* group have no business in the
+// dashboard — hence access denied.
+func roleFromGroups(groups []string, adminGroup string) string {
+	hasK8sGroup := false
+	for _, g := range groups {
+		if adminGroup != "" && g == adminGroup {
+			return RoleAdmin
+		}
+		if strings.HasPrefix(g, "k8s-") {
+			hasK8sGroup = true
+		}
+	}
+	if hasK8sGroup {
+		return RoleViewer
+	}
+	return ""
 }

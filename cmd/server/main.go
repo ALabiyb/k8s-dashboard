@@ -11,8 +11,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/yourorg/k8s-dashboard/config"
-	"github.com/yourorg/k8s-dashboard/internal/api"
+	"github.com/ALabiyb/k8s-dashboard/config"
+	"github.com/ALabiyb/k8s-dashboard/internal/api"
 )
 
 func main() {

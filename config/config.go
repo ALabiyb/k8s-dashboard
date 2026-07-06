@@ -24,14 +24,17 @@ type Config struct {
 // OIDCConfig holds Keycloak / OpenID Connect settings.
 // ClientSecret must be set via the OIDC_CLIENT_SECRET env var in production
 // (same pattern as SMTP_PASSWORD) — never commit a real secret to YAML.
+//
+// Role model: the dashboard maps Keycloak *groups* (not realm roles) to
+// dashboard roles. See docs and the K8s Dashboard OIDC RBAC Migration
+// runbook for the full model.
 type OIDCConfig struct {
 	Enabled       bool   `yaml:"enabled"`
-	IssuerURL     string `yaml:"issuer_url"`      // e.g. https://keycloak.example.com/realms/myrealm
+	IssuerURL     string `yaml:"issuer_url"`      // e.g. https://keycloak.example.com/realms/myrealm ; overridden by OIDC_ISSUER_URL env var
 	ClientID      string `yaml:"client_id"`
 	ClientSecret  string `yaml:"client_secret"`   // overridden by OIDC_CLIENT_SECRET env var
-	RedirectURL   string `yaml:"redirect_url"`    // must be registered in the Keycloak client
-	AdminRole     string `yaml:"admin_role"`      // Keycloak realm role → maps to dashboard admin
-	ViewerRole    string `yaml:"viewer_role"`     // Keycloak realm role → maps to dashboard viewer
+	RedirectURL   string `yaml:"redirect_url"`    // must be registered in the Keycloak client ; overridden by OIDC_REDIRECT_URL env var
+	AdminGroup    string `yaml:"admin_group"`     // Keycloak group whose members become dashboard admins (e.g. k8s-cluster-admins)
 	TLSSkipVerify bool   `yaml:"tls_skip_verify"` // skip TLS cert check for internal/self-signed CAs (dev only)
 }
 
@@ -102,6 +105,16 @@ func Load(path string) (*Config, error) {
 	// ConfigMap or committed YAML file.
 	if s := os.Getenv("OIDC_CLIENT_SECRET"); s != "" {
 		cfg.OIDC.ClientSecret = s
+	}
+	// OIDC_ISSUER_URL and OIDC_REDIRECT_URL let the deployment override the
+	// values baked into the ConfigMap-shipped YAML. Useful when the same image
+	// is deployed to multiple environments (dev/staging/prod) that hit
+	// different Keycloak realms or dashboard URLs.
+	if s := os.Getenv("OIDC_ISSUER_URL"); s != "" {
+		cfg.OIDC.IssuerURL = s
+	}
+	if s := os.Getenv("OIDC_REDIRECT_URL"); s != "" {
+		cfg.OIDC.RedirectURL = s
 	}
 
 	return &cfg, nil
