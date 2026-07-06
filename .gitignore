@@ -1,1 +1,14 @@
-k8s-dashboard-manifestk8s-dashboard-manifest/
+# Manifest repo is a separate GitLab repo, kept as a sibling directory —
+# ignore if anyone happens to clone it back under this tree.
+k8s-dashboard-manifest/
+
+# Local IDE + editor state
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Build artifacts
+/bin/
+run.log
+cookies.txt

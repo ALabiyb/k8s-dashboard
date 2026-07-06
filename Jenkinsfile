@@ -193,7 +193,7 @@ pipeline {
                 script {
                     generateSbom(
                         projectName:    env.IMAGE_NAME,
-                        projectVersion: env.DEPLOY_IMAGE_TAG
+                        // projectVersion: env.DEPLOY_IMAGE_TAG
                     )
                 }
             }
@@ -229,11 +229,26 @@ pipeline {
 
         // ── Regular manifest update (all branches except prod) ────────────────
         // On prod, productionApproval() handles the manifest update above.
+        //
+        // Branch → manifest branch mapping (project-local override):
+        //   main → manifest main   — record image tag as backup; NO ArgoCD
+        //                            app watches manifest main, so this
+        //                            never deploys anywhere. Merging main
+        //                            into dev/uat is what triggers a deploy.
+        //   dev  → manifest dev    — deploys to dev cluster
+        //   uat  → manifest uat    — deploys to uat cluster
+        //   (prod handled above by productionApproval())
+        //
+        // We override params.branch here rather than editing the shared
+        // library so other projects on jenkins-shared-library@main keep
+        // their default behaviour (main → dev). See
+        // vars/k8sManifestScanAndUpdate.groovy:44 for the fallback logic.
         stage('k8s Manifest Update') {
             when { not { branch 'prod' } }
             steps {
                 script {
-                    k8sManifestScanAndUpdate()
+                    def targetManifestBranch = (env.BRANCH_NAME == 'main') ? 'main' : null
+                    k8sManifestScanAndUpdate(branch: targetManifestBranch)
                 }
             }
         }
