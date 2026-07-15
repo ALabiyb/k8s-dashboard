@@ -16,9 +16,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/ALabiyb/k8s-dashboard/internal/aggregator"
 	"github.com/ALabiyb/k8s-dashboard/internal/auth"
@@ -265,6 +268,202 @@ func metaListOpts(labelSelector string) metav1.ListOptions {
 	return metav1.ListOptions{LabelSelector: labelSelector}
 }
 
+// handleRestartDeployment triggers a rolling restart of a Deployment or
+// StatefulSet by patching the pod template with the
+// `kubectl.kubernetes.io/restartedAt` annotation — the same mechanism
+// `kubectl rollout restart` uses.
+//
+// Route:  POST /api/workloads/{ns}/{kind}/{name}/restart
+//
+//	kind ∈ {deployment, statefulset}
+//
+// Verb required: `patch deployments` or `patch statefulsets`
+// (edit-nodelete has this — see K8s RBAC Bindings runbook §5.1).
+// Authorization is enforced by K8s RBAC via the user's OIDC token.
+func (s *Server) handleRestartWorkload(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("ns")
+	kind := strings.ToLower(r.PathValue("kind"))
+	name := r.PathValue("name")
+	if ns == "" || kind == "" || name == "" {
+		http.Error(w, "namespace, kind and name required", http.StatusBadRequest)
+		return
+	}
+	if kind != "deployment" && kind != "statefulset" {
+		http.Error(w, "kind must be 'deployment' or 'statefulset'", http.StatusBadRequest)
+		return
+	}
+
+	// Mock mode: pretend the restart succeeded so the UI can be tested
+	// end-to-end without a real cluster. No collector side-effect.
+	if s.mockMode {
+		slog.Info("mock: simulated restart", "component", "api",
+			"user", claimsUsername(r), "ns", ns, "kind", kind, "name", name)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":          true,
+			"mock":        true,
+			"kind":        kind,
+			"name":        name,
+			"namespace":   ns,
+			"restartedAt": time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	cs, err := s.userK8sClient(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+
+	// The patch: set spec.template.metadata.annotations
+	// `kubectl.kubernetes.io/restartedAt` to now. K8s notices the pod
+	// template changed and rolls out fresh pods. Same mechanism as
+	// `kubectl rollout restart deployment/foo`.
+	patch := fmt.Sprintf(
+		`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+
+	ctx := r.Context()
+	var patchErr error
+	switch kind {
+	case "deployment":
+		_, patchErr = cs.AppsV1().Deployments(ns).Patch(
+			ctx, name, k8stypes.StrategicMergePatchType, []byte(patch),
+			metav1.PatchOptions{},
+		)
+	case "statefulset":
+		_, patchErr = cs.AppsV1().StatefulSets(ns).Patch(
+			ctx, name, k8stypes.StrategicMergePatchType, []byte(patch),
+			metav1.PatchOptions{},
+		)
+	}
+	if patchErr != nil {
+		writeK8sError(w, patchErr, ns, name)
+		return
+	}
+
+	slog.Info("workload restarted", "component", "api",
+		"user", auth.GetClaims(r).Username, "ns", ns, "kind", kind, "name", name)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":         true,
+		"kind":       kind,
+		"name":       name,
+		"namespace":  ns,
+		"restartedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// handleDeletePod deletes a single pod. Kubernetes recreates it
+// automatically if it's part of a Deployment/StatefulSet.
+//
+// Route:  DELETE /api/pods/{ns}/{name}
+//
+// Verb required: `delete pods` — only cluster-admin (via k8s-cluster-admins
+// group) has this in our RBAC model. Namespace-editors get 403 from the
+// apiserver, surfaced here as 403 with a friendly message.
+func (s *Server) handleDeletePod(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("ns")
+	name := r.PathValue("name")
+	if ns == "" || name == "" {
+		http.Error(w, "namespace and pod name required", http.StatusBadRequest)
+		return
+	}
+
+	// Mock mode: simulate the delete for UI testing (no real pod exists).
+	if s.mockMode {
+		slog.Info("mock: simulated pod delete", "component", "api",
+			"user", claimsUsername(r), "ns", ns, "pod", name)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":        true,
+			"mock":      true,
+			"deleted":   name,
+			"namespace": ns,
+		})
+		return
+	}
+
+	cs, err := s.userK8sClient(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+
+	// Default grace period (30s). Callers can override with ?force=true which
+	// sets grace-period=0 for a fast delete — useful when a pod is wedged.
+	opts := metav1.DeleteOptions{}
+	if r.URL.Query().Get("force") == "true" {
+		var zero int64
+		opts.GracePeriodSeconds = &zero
+	}
+
+	if err := cs.CoreV1().Pods(ns).Delete(r.Context(), name, opts); err != nil {
+		writeK8sError(w, err, ns, name)
+		return
+	}
+
+	slog.Info("pod deleted", "component", "api",
+		"user", auth.GetClaims(r).Username, "ns", ns, "pod", name,
+		"force", r.URL.Query().Get("force") == "true")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":        true,
+		"deleted":   name,
+		"namespace": ns,
+	})
+}
+
+// userK8sClient centralises the boilerplate that every write-action handler
+// needs: verify the request has an OIDC session, refresh the access token
+// if needed, and build a per-request K8s client that authenticates AS the
+// human. Returns a sentinel error the caller can pass to writeAuthError.
+func (s *Server) userK8sClient(r *http.Request) (*kubernetes.Clientset, error) {
+	if s.mockMode {
+		return nil, errMockMode
+	}
+	if s.oidc == nil {
+		return nil, errNoOIDC
+	}
+	sessionID := auth.SessionIDFrom(r)
+	if sessionID == "" {
+		return nil, errNoSession
+	}
+	token, err := s.oidc.ValidAccessToken(r.Context(), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return k8s.ForUser(token)
+}
+
+// Sentinel errors for auth pre-checks. writeAuthError maps them to HTTP.
+var (
+	errMockMode  = errors.New("mock mode: cluster mutation unavailable")
+	errNoOIDC    = errors.New("OIDC not configured on this server")
+	errNoSession = errors.New("no active session")
+)
+
+func writeAuthError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errMockMode):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	case errors.Is(err, errNoOIDC):
+		http.Error(w, "requires OIDC authentication", http.StatusForbidden)
+	case errors.Is(err, errNoSession):
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+	case errors.Is(err, auth.ErrNoOIDCSession):
+		http.Error(w, "not an OIDC session; sign in via Keycloak", http.StatusForbidden)
+	case errors.Is(err, auth.ErrRefreshFailed):
+		http.Error(w, "session expired; sign in again", http.StatusUnauthorized)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 // handlePodLogs streams container logs for a specific pod.
 //
 // Route (Go 1.22+ path patterns):
@@ -421,4 +620,16 @@ func containsAny(s string, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+// claimsUsername returns the authenticated username or "" if the request
+// has no claims attached (e.g. TV kiosk path). Used by mock-mode stubs
+// where we still want an audit-log line but haven't run the real auth
+// pre-check.
+func claimsUsername(r *http.Request) string {
+	c := auth.GetClaims(r)
+	if c == nil {
+		return ""
+	}
+	return c.Username
 }

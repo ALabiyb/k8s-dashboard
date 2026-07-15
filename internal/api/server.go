@@ -185,6 +185,13 @@ func (s *Server) Start() error {
 	// Streaming pod logs — authorization is enforced by K8s RBAC through
 	// the user's OIDC token (see internal/k8s/user_client.go).
 	mux.HandleFunc("GET /api/pods/{ns}/{name}/logs", s.handlePodLogs)
+	// Write actions (slice 5). Authorization is enforced by K8s RBAC:
+	//   restart Deployment/StatefulSet  → verb `patch` (edit-nodelete + admin)
+	//   delete Pod                      → verb `delete` (admin only per
+	//                                     current RBAC bindings — see the
+	//                                     K8s RBAC Bindings runbook)
+	mux.HandleFunc("POST /api/workloads/{ns}/{kind}/{name}/restart", s.handleRestartWorkload)
+	mux.HandleFunc("DELETE /api/pods/{ns}/{name}", s.handleDeletePod)
 
 	// ── TV kiosk mode (no auth) ───────────────────────────────────────────
 	// Public read-only endpoints for the kiosk display. No login, no cookie,
