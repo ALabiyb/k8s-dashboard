@@ -144,7 +144,7 @@ func New(cfg *config.Config, useMock bool) (*Server, error) {
 	slog.Info("connected to Kubernetes cluster", "component", "server")
 	return &Server{cfg: cfg, collector: col, aggregator: agg, notifier: not,
 		mockMode: false, users: users, secret: secret, embedToken: embedToken,
-		oidc: oidcHandler, oidcAdminGroup: cfg.OIDC.AdminGroup}, nil
+		sessions: sessions, oidc: oidcHandler, oidcAdminGroup: cfg.OIDC.AdminGroup}, nil
 }
 
 // Start runs the initial poll, launches the background poll goroutine,
