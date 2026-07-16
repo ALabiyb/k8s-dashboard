@@ -59,9 +59,20 @@ notifications:
     smtp_username: "you@gmail.com"
     smtp_password: "your-app-password"   # use an app password, not your real password
     from: "k8s-dashboard@yourorg.com"
+    # Optional display name shown by mail clients as the sender ("K8s Dashboard
+    # <k8s-dashboard@yourorg.com>"). Leave empty to send the bare address.
+    # Note: the envelope sender stays bare regardless — SMTP servers like Zoho
+    # reject envelopes with a display name.
+    from_display_name: "K8s Dashboard"
     to:
       - "team@yourorg.com"
       - "oncall@yourorg.com"
     # Only send email when health STATE changes (green→amber, amber→red, etc.)
     # This prevents spam on every poll cycle
     on_state_change_only: true
+    # Link inserted into the alert body's "View dashboard" call-to-action.
+    # Leave empty to omit the link entirely.
+    dashboard_url: "https://k8s-dashboard.dev.softnethq.co.tz"
+    # true → send styled HTML (colored state badges, service list, button);
+    # false → send plain text. Both templates share the same data.
+    html_body: true

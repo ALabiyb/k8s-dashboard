@@ -62,8 +62,11 @@ type EmailConfig struct {
 	SMTPUsername      string   `yaml:"smtp_username"`
 	SMTPPassword      string   `yaml:"smtp_password"`
 	From              string   `yaml:"from"`
+	FromDisplayName   string   `yaml:"from_display_name"`
 	To                []string `yaml:"to"`
 	OnStateChangeOnly bool     `yaml:"on_state_change_only"`
+	DashboardURL      string   `yaml:"dashboard_url"`
+	HTMLBody          bool     `yaml:"html_body"`
 }
 
 // Load reads config.yaml from the given file path and returns a Config struct.

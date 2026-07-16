@@ -60,18 +60,18 @@ func (n *Notifier) CheckAndNotify(summary aggregator.Summary) {
 
 // emailData is passed into the email template below.
 type emailData struct {
-	ProductName    string
-	OldState       string
-	NewState       string
-	Score          int
-	HealthyCount   int
-	TotalCount     int
-	Timestamp      string
-	UnhealthyList  []string // names of unhealthy services
+	ProductName   string
+	OldState      string
+	NewState      string
+	Score         int
+	HealthyCount  int
+	TotalCount    int
+	Timestamp     string
+	UnhealthyList []string // names of unhealthy services
+	DashboardURL  string   // link included in the "View dashboard" call-to-action
 }
 
-// emailTemplate is the plain-text email body.
-// To make it HTML, change smtp.SendMail content-type and use html/template.
+// emailTemplate is the plain-text email body — used when EmailConfig.HTMLBody is false.
 var emailTemplate = template.Must(template.New("email").Parse(`
 K8s Dashboard Alert
 ===================
@@ -85,8 +85,62 @@ Unhealthy services:
 {{ range .UnhealthyList }}  - {{ . }}
 {{ end }}
 {{- end }}
+{{ if .DashboardURL }}
+View dashboard: {{ .DashboardURL }}
+{{- end }}
+`))
 
-View dashboard: http://k8s-dashboard.your-domain.com
+// htmlEmailTemplate is the HTML alternative — used when EmailConfig.HTMLBody is true.
+// Inline styles only (email clients strip <style> blocks). Colours match the
+// dashboard: red = Critical, amber = Degraded, green = Healthy.
+var htmlEmailTemplate = template.Must(template.New("email-html").Parse(`<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+  <div style="border-left: 4px solid {{ if eq .NewState "Critical" }}#dc3545{{ else if eq .NewState "Degraded" }}#ffc107{{ else }}#28a745{{ end }}; padding: 12px 20px; background: #f8f9fa; margin-bottom: 20px;">
+    <h2 style="margin: 0 0 4px 0; font-size: 18px;">K8s Dashboard Alert</h2>
+    <div style="font-size: 13px; color: #666;">{{ .Timestamp }}</div>
+  </div>
+
+  <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+    <tr>
+      <td style="padding: 8px 0; font-weight: 600; width: 120px; color: #555;">Product</td>
+      <td style="padding: 8px 0;">{{ .ProductName }}</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px 0; font-weight: 600; color: #555;">State</td>
+      <td style="padding: 8px 0;">
+        <span style="color: #999;">{{ .OldState }}</span>
+        &nbsp;→&nbsp;
+        <span style="font-weight: 600; color: {{ if eq .NewState "Critical" }}#dc3545{{ else if eq .NewState "Degraded" }}#ffc107{{ else }}#28a745{{ end }};">{{ .NewState }}</span>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding: 8px 0; font-weight: 600; color: #555;">Health</td>
+      <td style="padding: 8px 0;">{{ .HealthyCount }}/{{ .TotalCount }} services healthy ({{ .Score }}%)</td>
+    </tr>
+  </table>
+
+  {{ if .UnhealthyList }}
+  <div style="background: #fff5f5; border: 1px solid #f5c6c6; padding: 12px 16px; border-radius: 4px; margin-bottom: 20px;">
+    <div style="font-weight: 600; margin-bottom: 8px; color: #b03535;">Unhealthy services</div>
+    <ul style="margin: 0; padding-left: 20px;">
+      {{ range .UnhealthyList }}<li style="margin-bottom: 4px; font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 13px;">{{ . }}</li>{{ end }}
+    </ul>
+  </div>
+  {{ end }}
+
+  {{ if .DashboardURL }}
+  <div style="text-align: center; margin: 24px 0;">
+    <a href="{{ .DashboardURL }}" style="display: inline-block; padding: 10px 24px; background: #0d6efd; color: #ffffff; text-decoration: none; border-radius: 4px; font-weight: 500;">View dashboard</a>
+  </div>
+  {{ end }}
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
+  <div style="font-size: 12px; color: #999; text-align: center;">
+    SoftNet K8s Dashboard · automated alert
+  </div>
+</body>
+</html>
 `))
 
 // sendEmail builds and sends a single alert email for one product.
@@ -108,17 +162,33 @@ func (n *Notifier) sendEmail(product aggregator.ProductHealth) error {
 		TotalCount:    product.TotalCount,
 		Timestamp:     time.Now().Format("2006-01-02 15:04:05 UTC"),
 		UnhealthyList: unhealthy,
+		DashboardURL:  n.cfg.DashboardURL,
 	}
 
-	// Render the email body from the template
+	// Pick template + Content-Type based on config.
+	tmpl := emailTemplate
+	contentType := "text/plain; charset=utf-8"
+	if n.cfg.HTMLBody {
+		tmpl = htmlEmailTemplate
+		contentType = "text/html; charset=utf-8"
+	}
+
 	var body bytes.Buffer
-	if err := emailTemplate.Execute(&body, data); err != nil {
+	if err := tmpl.Execute(&body, data); err != nil {
 		return fmt.Errorf("rendering email template: %w", err)
 	}
 
-	// Build the raw email message with headers
+	// From: header. Envelope sender (MAIL FROM) MUST stay as bare n.cfg.From
+	// because Zoho and most modern SMTP servers reject an envelope address
+	// with a display name. The visible "From:" header inside the message body
+	// is what mail clients render — so put the display name only there.
+	fromHeader := n.cfg.From
+	if n.cfg.FromDisplayName != "" {
+		fromHeader = fmt.Sprintf("%q <%s>", n.cfg.FromDisplayName, n.cfg.From)
+	}
+
 	subject := fmt.Sprintf("[K8s Alert] %s is %s", product.DisplayName, product.Health)
-	msg := buildMessage(n.cfg.From, n.cfg.To, subject, body.String())
+	msg := buildMessage(fromHeader, n.cfg.To, subject, body.String(), contentType)
 
 	// Connect to SMTP and send
 	addr := fmt.Sprintf("%s:%d", n.cfg.SMTPHost, n.cfg.SMTPPort)
@@ -128,13 +198,13 @@ func (n *Notifier) sendEmail(product aggregator.ProductHealth) error {
 }
 
 // buildMessage formats a raw RFC 2822 email message string.
-func buildMessage(from string, to []string, subject, body string) string {
+func buildMessage(from string, to []string, subject, body, contentType string) string {
 	return strings.Join([]string{
 		"From: " + from,
 		"To: " + strings.Join(to, ", "),
 		"Subject: " + subject,
 		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=utf-8",
+		"Content-Type: " + contentType,
 		"",
 		body,
 	}, "\r\n")
