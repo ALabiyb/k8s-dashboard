@@ -17,10 +17,22 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	_ "time/tzdata" // embed the tz database so LoadLocation works on tzdata-less alpine
 
 	"github.com/ALabiyb/k8s-dashboard/config"
 	"github.com/ALabiyb/k8s-dashboard/internal/aggregator"
 )
+
+// alertTZ is the display timezone for email timestamps. Falls back to UTC
+// when the tzdata database can't resolve Africa/Dar_es_Salaam (rare — alpine
+// images without tzdata installed).
+var alertTZ = func() *time.Location {
+	loc, err := time.LoadLocation("Africa/Dar_es_Salaam")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}()
 
 // Notifier handles sending alerts.
 type Notifier struct {
@@ -93,52 +105,112 @@ View dashboard: {{ .DashboardURL }}
 // htmlEmailTemplate is the HTML alternative — used when EmailConfig.HTMLBody is true.
 // Inline styles only (email clients strip <style> blocks). Colours match the
 // dashboard: red = Critical, amber = Degraded, green = Healthy.
+//
+// State-aware theming: header gradient, badge, and icon all recolor by state.
+// Dark-body-safe: the outer card sits on a light neutral card, so the email
+// renders identically in Gmail dark mode and light mode.
 var htmlEmailTemplate = template.Must(template.New("email-html").Parse(`<!DOCTYPE html>
-<html>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
-  <div style="border-left: 4px solid {{ if eq .NewState "Critical" }}#dc3545{{ else if eq .NewState "Degraded" }}#ffc107{{ else }}#28a745{{ end }}; padding: 12px 20px; background: #f8f9fa; margin-bottom: 20px;">
-    <h2 style="margin: 0 0 4px 0; font-size: 18px;">K8s Dashboard Alert</h2>
-    <div style="font-size: 13px; color: #666;">{{ .Timestamp }}</div>
-  </div>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>K8s Dashboard Alert</title>
+</head>
+<body style="margin:0;padding:0;background:#eef2f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#1f2937;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f7;padding:32px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 4px 20px rgba(15,23,42,0.08);">
 
-  <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-    <tr>
-      <td style="padding: 8px 0; font-weight: 600; width: 120px; color: #555;">Product</td>
-      <td style="padding: 8px 0;">{{ .ProductName }}</td>
-    </tr>
-    <tr>
-      <td style="padding: 8px 0; font-weight: 600; color: #555;">State</td>
-      <td style="padding: 8px 0;">
-        <span style="color: #999;">{{ .OldState }}</span>
-        &nbsp;→&nbsp;
-        <span style="font-weight: 600; color: {{ if eq .NewState "Critical" }}#dc3545{{ else if eq .NewState "Degraded" }}#ffc107{{ else }}#28a745{{ end }};">{{ .NewState }}</span>
+          <!-- HEADER: state-tinted gradient with emoji icon + title -->
+          <tr>
+            <td style="padding:28px 32px 20px;background:linear-gradient(135deg,{{ if eq .NewState "Critical" }}#c53030 0%,#7f1d1d 100%{{ else if eq .NewState "Degraded" }}#c98a1a 0%,#7c4a0d 100%{{ else }}#16a34a 0%,#166534 100%{{ end }});color:#ffffff;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="font-size:32px;line-height:1;padding-right:14px;width:44px;vertical-align:middle;">
+                    {{ if eq .NewState "Critical" }}🚨{{ else if eq .NewState "Degraded" }}⚠️{{ else }}✅{{ end }}
+                  </td>
+                  <td style="vertical-align:middle;">
+                    <div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;opacity:0.85;font-weight:600;">K8s Dashboard · Alert</div>
+                    <div style="font-size:22px;font-weight:700;margin-top:4px;line-height:1.25;">{{ .ProductName }} is {{ .NewState }}</div>
+                    <div style="font-size:13px;opacity:0.9;margin-top:6px;">{{ .Timestamp }}</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- STATE PILL + SCORE STRIP -->
+          <tr>
+            <td style="padding:20px 32px 0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td>
+                    <span style="display:inline-block;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:600;color:#6b7280;background:#e5e7eb;">{{ .OldState }}</span>
+                    <span style="padding:0 6px;color:#9ca3af;font-size:14px;">→</span>
+                    <span style="display:inline-block;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;color:#ffffff;background:{{ if eq .NewState "Critical" }}#dc2626{{ else if eq .NewState "Degraded" }}#d97706{{ else }}#16a34a{{ end }};">{{ .NewState }}</span>
+                  </td>
+                  <td align="right" style="font-size:13px;color:#6b7280;">
+                    <span style="font-weight:700;color:#111827;font-size:16px;">{{ .HealthyCount }}/{{ .TotalCount }}</span>
+                    &nbsp;services healthy · <span style="font-weight:700;">{{ .Score }}%</span>
+                  </td>
+                </tr>
+              </table>
+              <!-- health bar -->
+              <div style="margin-top:14px;height:6px;background:#e5e7eb;border-radius:999px;overflow:hidden;">
+                <div style="height:6px;width:{{ .Score }}%;background:{{ if eq .NewState "Critical" }}#dc2626{{ else if eq .NewState "Degraded" }}#d97706{{ else }}#16a34a{{ end }};"></div>
+              </div>
+            </td>
+          </tr>
+
+          {{ if .UnhealthyList }}
+          <!-- UNHEALTHY SERVICES CARD -->
+          <tr>
+            <td style="padding:24px 32px 0;">
+              <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:16px 18px;">
+                <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#991b1b;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">
+                  <span style="font-size:16px;">🔻</span> Unhealthy services · {{ len .UnhealthyList }}
+                </div>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  {{ range .UnhealthyList }}
+                  <tr>
+                    <td style="padding:6px 0;font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:13px;color:#7f1d1d;">
+                      <span style="color:#dc2626;margin-right:8px;">▸</span>{{ . }}
+                    </td>
+                  </tr>
+                  {{ end }}
+                </table>
+              </div>
+            </td>
+          </tr>
+          {{ end }}
+
+          {{ if .DashboardURL }}
+          <!-- CTA -->
+          <tr>
+            <td align="center" style="padding:28px 32px 8px;">
+              <a href="{{ .DashboardURL }}" style="display:inline-block;padding:12px 28px;background:#111827;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px;letter-spacing:0.3px;box-shadow:0 2px 8px rgba(17,24,39,0.2);">
+                Open dashboard →
+              </a>
+              <div style="margin-top:10px;font-size:12px;color:#6b7280;">Or copy: <span style="font-family:'SFMono-Regular',Menlo,Consolas,monospace;color:#374151;">{{ .DashboardURL }}</span></div>
+            </td>
+          </tr>
+          {{ end }}
+
+          <!-- FOOTER -->
+          <tr>
+            <td style="padding:24px 32px 28px;">
+              <div style="border-top:1px solid #e5e7eb;padding-top:16px;text-align:center;font-size:12px;color:#9ca3af;line-height:1.6;">
+                <div style="font-weight:600;color:#6b7280;">SoftNet K8s Dashboard</div>
+                <div>Automated alert · fires only on health state transitions</div>
+              </div>
+            </td>
+          </tr>
+
+        </table>
       </td>
     </tr>
-    <tr>
-      <td style="padding: 8px 0; font-weight: 600; color: #555;">Health</td>
-      <td style="padding: 8px 0;">{{ .HealthyCount }}/{{ .TotalCount }} services healthy ({{ .Score }}%)</td>
-    </tr>
   </table>
-
-  {{ if .UnhealthyList }}
-  <div style="background: #fff5f5; border: 1px solid #f5c6c6; padding: 12px 16px; border-radius: 4px; margin-bottom: 20px;">
-    <div style="font-weight: 600; margin-bottom: 8px; color: #b03535;">Unhealthy services</div>
-    <ul style="margin: 0; padding-left: 20px;">
-      {{ range .UnhealthyList }}<li style="margin-bottom: 4px; font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 13px;">{{ . }}</li>{{ end }}
-    </ul>
-  </div>
-  {{ end }}
-
-  {{ if .DashboardURL }}
-  <div style="text-align: center; margin: 24px 0;">
-    <a href="{{ .DashboardURL }}" style="display: inline-block; padding: 10px 24px; background: #0d6efd; color: #ffffff; text-decoration: none; border-radius: 4px; font-weight: 500;">View dashboard</a>
-  </div>
-  {{ end }}
-
-  <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
-  <div style="font-size: 12px; color: #999; text-align: center;">
-    SoftNet K8s Dashboard · automated alert
-  </div>
 </body>
 </html>
 `))
@@ -160,7 +232,7 @@ func (n *Notifier) sendEmail(product aggregator.ProductHealth) error {
 		Score:         product.ScorePercent,
 		HealthyCount:  product.HealthyCount,
 		TotalCount:    product.TotalCount,
-		Timestamp:     time.Now().Format("2006-01-02 15:04:05 UTC"),
+		Timestamp:     time.Now().In(alertTZ).Format("Mon, 02 Jan 2006 · 15:04:05 MST"),
 		UnhealthyList: unhealthy,
 		DashboardURL:  n.cfg.DashboardURL,
 	}
