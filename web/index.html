@@ -446,15 +446,19 @@
 
     .logs-scrim { z-index: 110; } /* above the details modal */
     .logs-modal {
-      width: 1080px; max-width: 100%; max-height: 84vh;
+      /* Focus mode by default — the log viewer takes over the viewport so the
+         reader isn't distracted by the dashboard grid behind. Click "compact"
+         in the toolbar to shrink to a windowed modal. */
+      width: 96vw; max-width: 96vw; max-height: 92vh;
       display: flex; flex-direction: column;
       background: linear-gradient(180deg, var(--panel), var(--panel-2));
-      border: 1px solid var(--border-2); border-radius: 18px; overflow: hidden;
+      border: 1px solid var(--border-2); border-radius: 10px; overflow: hidden;
       box-shadow: 0 40px 100px -20px rgba(0,0,0,.8);
       transform: translateY(14px) scale(.985); opacity: 0;
-      transition: transform .2s cubic-bezier(.2,.8,.3,1), opacity .2s;
+      transition: transform .2s cubic-bezier(.2,.8,.3,1), opacity .2s, width .18s ease, max-width .18s ease, max-height .18s ease;
     }
     .logs-scrim.open .logs-modal { transform: none; opacity: 1; }
+    .logs-modal.compact { width: 1080px; max-width: 100%; max-height: 84vh; border-radius: 18px; }
     .logs-head {
       display: flex; align-items: center; gap: 16px;
       padding: 14px 20px; border-bottom: 1px solid var(--border);
@@ -663,6 +667,7 @@
       </div>
       <div class="logs-actions">
         <button id="logs-follow-btn" class="logs-btn-action" title="Toggle live tail">follow</button>
+        <button id="logs-compact-btn" class="logs-btn-action" title="Toggle compact / focus mode">compact</button>
         <!-- Delete Pod — only visible to dashboard admins (k8s-cluster-admins).
              The button is unhidden by JS after /api/me returns role:admin.
              Kubernetes RBAC is the authoritative check — non-admins clicking
@@ -1337,6 +1342,19 @@
     const ns = parts[0];
     const pod = document.getElementById('logs-pod-select').value;
     streamLogs(ns, pod, e.target.value);
+  });
+
+  // Compact toggle: log modal defaults to full-viewport focus mode; user
+  // can flip to a smaller windowed modal if they need to see the dashboard
+  // grid behind. Preference persists in localStorage across visits.
+  const compactBtn = document.getElementById('logs-compact-btn');
+  const logsModal = document.getElementById('logs-modal');
+  const compactPref = localStorage.getItem('logs-compact') === '1';
+  if (compactPref) { logsModal.classList.add('compact'); compactBtn.classList.add('active'); }
+  compactBtn.addEventListener('click', () => {
+    const on = logsModal.classList.toggle('compact');
+    compactBtn.classList.toggle('active', on);
+    localStorage.setItem('logs-compact', on ? '1' : '0');
   });
 
   const followBtn = document.getElementById('logs-follow-btn');
