@@ -225,8 +225,9 @@ func (s *Server) handlePodList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try each label key the collector understands, in the same order.
-	// First match wins — most workloads use exactly one convention.
+	// Lookup strategy: label-based first (fast, common), then owner-reference
+	// walk (robust — works even when label value != workload name, e.g. Rook
+	// Ceph OSDs use app=rook-ceph-osd + rook-ceph-osd-id=<n>).
 	var pods []corev1.Pod
 	for _, key := range []string{"app.kubernetes.io/name", "app", "name"} {
 		list, err := cs.CoreV1().Pods(ns).List(r.Context(), metaListOpts(key+"="+owner))
@@ -237,6 +238,22 @@ func (s *Server) handlePodList(w http.ResponseWriter, r *http.Request) {
 		if len(list.Items) > 0 {
 			pods = list.Items
 			break
+		}
+	}
+	if len(pods) == 0 {
+		// Fallback: list all pods in the namespace, walk their ownerReferences
+		// up one hop (ReplicaSet or the workload itself). If any ref resolves
+		// to the requested owner name, include the pod. Handles Deployments
+		// (Pod → ReplicaSet → Deployment) and StatefulSets/DaemonSets directly.
+		all, err := cs.CoreV1().Pods(ns).List(r.Context(), metav1.ListOptions{})
+		if err != nil {
+			writeK8sError(w, err, ns, owner)
+			return
+		}
+		for _, p := range all.Items {
+			if podOwnedBy(r.Context(), cs, ns, p, owner) {
+				pods = append(pods, p)
+			}
 		}
 	}
 
@@ -260,6 +277,40 @@ func (s *Server) handlePodList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// podOwnedBy returns true if the pod's ownership chain resolves to a workload
+// named `owner`. Walks up to one intermediate hop:
+//
+//	Pod → ReplicaSet → Deployment (owner name matches Deployment)
+//	Pod → StatefulSet | DaemonSet | Job (owner name matches directly)
+//
+// Any error at an intermediate step is treated as "not owned" — the caller
+// falls through and the pod is simply not listed. Errors are noisy but
+// non-fatal (an admin can still see the same info via kubectl).
+func podOwnedBy(ctx context.Context, cs kubernetes.Interface, ns string, p corev1.Pod, owner string) bool {
+	for _, ref := range p.OwnerReferences {
+		// Direct match — StatefulSet, DaemonSet, Job, or any resource whose
+		// name we're already searching for.
+		if ref.Name == owner {
+			return true
+		}
+		// ReplicaSet → Deployment (single hop). ReplicaSet names look like
+		// "<deployment>-<hash>" but we don't string-match — we look up the
+		// RS and check its OwnerReferences directly.
+		if ref.Kind == "ReplicaSet" {
+			rs, err := cs.AppsV1().ReplicaSets(ns).Get(ctx, ref.Name, metav1.GetOptions{})
+			if err != nil {
+				continue
+			}
+			for _, rsRef := range rs.OwnerReferences {
+				if rsRef.Name == owner {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // metaListOpts wraps a labelSelector in the metav1.ListOptions shape without

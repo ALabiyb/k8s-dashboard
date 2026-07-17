@@ -144,6 +144,31 @@
        right-aligned cluster on row 2 instead of splitting mid-row. */
     .header-actions { display: flex; align-items: center; gap: 14px; flex: none; margin-left: auto; }
 
+    /* search bar — sits between ticker and grid */
+    .search-bar {
+      display: flex; align-items: center; gap: 10px;
+      margin: 12px 0 14px;
+      padding: 6px 14px;
+      background: linear-gradient(180deg, var(--panel-hi), var(--panel));
+      border: 1px solid var(--border); border-radius: var(--r-sm);
+    }
+    .search-bar svg { flex: none; color: var(--text-dim); }
+    .search-bar input {
+      flex: 1;
+      background: transparent; border: none; outline: none;
+      color: var(--text); font: inherit; font-size: 14px;
+      padding: 6px 0;
+    }
+    .search-bar input::placeholder { color: var(--text-dim); }
+    .search-bar .search-count { font-size: 12px; color: var(--text-dim); flex: none; }
+    .search-bar .search-clear {
+      background: none; border: none; color: var(--text-dim);
+      cursor: pointer; padding: 4px 8px; border-radius: 4px;
+      font-size: 12px; font-family: inherit;
+    }
+    .search-bar .search-clear:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    .ns.filtered-out { display: none !important; }
+
     /* toolbar buttons */
     .toolbar { display: flex; align-items: center; gap: 7px; flex: none; }
     .ico-btn, .text-btn {
@@ -606,6 +631,17 @@
     <div class="ticker-mask"><div class="ticker-track" id="ticker-track"></div></div>
   </div>
 
+  <!-- ── Search / filter ──────────────────────────────────────────── -->
+  <!-- Client-side filter across the visible product tiles. Filters by
+       namespace name AND display name. Hidden in TV kiosk mode (search
+       is a per-user affordance, kiosks don't need it). -->
+  <div class="search-bar" id="search-bar">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="search-input" type="search" placeholder="Filter products by name or namespace…" autocomplete="off" spellcheck="false">
+    <span class="search-count" id="search-count"></span>
+    <button class="search-clear" id="search-clear" style="display:none" title="Clear (Esc)">clear</button>
+  </div>
+
   <!-- ── Namespace grid ─────────────────────────────────────────────── -->
   <div id="product-grid" class="grid">
     <div class="loading">Connecting to Kubernetes API&hellip;</div>
@@ -685,6 +721,70 @@
   let signInAt           = null;
   let currentSummaryData = null;
   let openNs             = null;
+  let searchQuery        = '';    // client-side filter for product-grid panels
+
+  // Hide the search bar in TV kiosk mode — TVs don't take input.
+  if (TV_MODE) {
+    const searchBar = document.getElementById('search-bar');
+    if (searchBar) searchBar.style.display = 'none';
+  } else {
+    const input = document.getElementById('search-input');
+    const clearBtn = document.getElementById('search-clear');
+    if (input) {
+      input.addEventListener('input', e => {
+        searchQuery = e.target.value.trim().toLowerCase();
+        clearBtn.style.display = searchQuery ? '' : 'none';
+        applySearchFilter();
+      });
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { input.value = ''; searchQuery = ''; clearBtn.style.display = 'none'; applySearchFilter(); input.blur(); }
+      });
+    }
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        input.value = '';
+        searchQuery = '';
+        clearBtn.style.display = 'none';
+        applySearchFilter();
+        input.focus();
+      });
+    }
+    // "/" focuses the search bar (unless already typing somewhere else).
+    document.addEventListener('keydown', e => {
+      if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+        e.preventDefault();
+        if (input) input.focus();
+      }
+    });
+  }
+
+  // Applies the current searchQuery to all product panels. Panels whose
+  // namespace name OR display name contain the query stay visible; others
+  // get .filtered-out. Called after every renderGrid() so a live poll
+  // refresh doesn't accidentally unhide filtered panels.
+  function applySearchFilter() {
+    const grid = document.getElementById('product-grid');
+    if (!grid) return;
+    const panels = grid.querySelectorAll('.ns');
+    let visible = 0;
+    panels.forEach(panel => {
+      if (!searchQuery) {
+        panel.classList.remove('filtered-out');
+        visible++;
+        return;
+      }
+      const ns = (panel.dataset.ns || '').toLowerCase();
+      const name = (panel.dataset.name || '').toLowerCase();
+      if (ns.includes(searchQuery) || name.includes(searchQuery)) {
+        panel.classList.remove('filtered-out');
+        visible++;
+      } else {
+        panel.classList.add('filtered-out');
+      }
+    });
+    const countEl = document.getElementById('search-count');
+    if (countEl) countEl.textContent = searchQuery ? `${visible} match${visible === 1 ? '' : 'es'}` : '';
+  }
   let focusMode          = false;
 
   // previous service-status snapshot, for deriving ticker events from real diffs
@@ -918,6 +1018,10 @@
     const sorted = [...products].sort((a, b) => rankHealth(a.Health) - rankHealth(b.Health));
     grid.innerHTML = sorted.map(renderPanel).join('');
 
+    // Re-apply the current search filter — panels rebuilt every poll, so
+    // an active filter needs to be re-applied on top of the fresh DOM.
+    applySearchFilter();
+
     // Drill-down is available to any authenticated non-TV session. TV
     // kiosk stays a pure read-only overview — no click affordance, no
     // modal open (the buttons inside the modal are gated too, so this
@@ -957,7 +1061,7 @@
     const issues = crit + warn;
 
     return `
-      <section class="ns ${crit ? 'has-crit' : ''} ${issues ? 'has-issues' : ''}">
+      <section class="ns ${crit ? 'has-crit' : ''} ${issues ? 'has-issues' : ''}" data-ns="${escHtml(p.Namespace)}" data-name="${escHtml(p.DisplayName || p.Namespace)}">
         <button class="ns-head" data-ns="${escHtml(p.Namespace)}" title="Expand ${escHtml(p.Namespace)}">
           <span class="ns-name">${escHtml(p.DisplayName || p.Namespace)}</span>
           <span class="ns-count">${total} svc</span>
