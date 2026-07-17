@@ -659,6 +659,7 @@
       <div class="logs-title">
         <span id="logs-svc"></span>
         <select id="logs-pod-select" class="logs-select"></select>
+        <select id="logs-container-select" class="logs-select" style="display:none" title="Container"></select>
       </div>
       <div class="logs-actions">
         <button id="logs-follow-btn" class="logs-btn-action" title="Toggle live tail">follow</button>
@@ -1279,26 +1280,63 @@
         body.textContent = 'no pods found for this service.';
         return;
       }
+      // Stash the container list per-pod on the select's data so the
+      // container picker can repopulate without another API call when the
+      // user switches pods.
+      window.__logsPods = {};
       for (const p of pods) {
         const opt = document.createElement('option');
         opt.value = p.name;
         opt.textContent = `${p.name}  (${p.phase})`;
         sel.appendChild(opt);
+        window.__logsPods[p.name] = p.containers || [];
       }
       sel.value = pods[0].name;
-      streamLogs(ns, sel.value);
+      populateContainerPicker(pods[0].name);
+      streamLogs(ns, sel.value, currentContainer());
     } catch (err) {
       body.classList.add('error');
       body.textContent = 'error: ' + err.message;
     }
   }
 
+  // Populates the container picker for a given pod. Shown only if the pod
+  // has more than one container — single-container pods don't need it and
+  // the kube API accepts a missing container name in that case.
+  function populateContainerPicker(podName) {
+    const csel = document.getElementById('logs-container-select');
+    const containers = (window.__logsPods && window.__logsPods[podName]) || [];
+    csel.innerHTML = '';
+    if (containers.length <= 1) {
+      csel.style.display = 'none';
+      return;
+    }
+    for (const c of containers) {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.textContent = c;
+      csel.appendChild(opt);
+    }
+    csel.style.display = '';
+  }
+
+  function currentContainer() {
+    const csel = document.getElementById('logs-container-select');
+    return (csel && csel.style.display !== 'none') ? csel.value : '';
+  }
+
   document.getElementById('logs-pod-select').addEventListener('change', e => {
-    const svc = document.getElementById('logs-svc').textContent.split('/')[0];
-    // svc contains the namespace since we set "ns/svc"
     const parts = document.getElementById('logs-svc').textContent.split('/');
     const ns = parts[0];
-    streamLogs(ns, e.target.value);
+    populateContainerPicker(e.target.value);
+    streamLogs(ns, e.target.value, currentContainer());
+  });
+
+  document.getElementById('logs-container-select').addEventListener('change', e => {
+    const parts = document.getElementById('logs-svc').textContent.split('/');
+    const ns = parts[0];
+    const pod = document.getElementById('logs-pod-select').value;
+    streamLogs(ns, pod, e.target.value);
   });
 
   const followBtn = document.getElementById('logs-follow-btn');
@@ -1312,11 +1350,11 @@
     if (svc) {
       const [ns] = svc.split('/');
       const pod = document.getElementById('logs-pod-select').value;
-      if (pod) streamLogs(ns, pod);
+      if (pod) streamLogs(ns, pod, currentContainer());
     }
   });
 
-  async function streamLogs(ns, pod) {
+  async function streamLogs(ns, pod, container) {
     if (logsAbort) logsAbort.abort();
     logsAbort = new AbortController();
     const body = document.getElementById('logs-body');
@@ -1325,8 +1363,9 @@
     body.textContent = '';
     status.textContent = followMode ? 'streaming (follow)' : 'streaming';
 
-    const url = `${API_BASE}/pods/${encodeURIComponent(ns)}/${encodeURIComponent(pod)}/logs`
+    let url = `${API_BASE}/pods/${encodeURIComponent(ns)}/${encodeURIComponent(pod)}/logs`
       + `?tail=500&follow=${followMode ? 'true' : 'false'}`;
+    if (container) url += `&container=${encodeURIComponent(container)}`;
 
     try {
       const res = await fetch(url, { signal: logsAbort.signal });
