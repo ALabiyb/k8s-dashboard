@@ -791,7 +791,13 @@
     const countEl = document.getElementById('search-count');
     if (countEl) countEl.textContent = searchQuery ? `${visible} match${visible === 1 ? '' : 'es'}` : '';
   }
-  let focusMode          = false;
+  // Focus mode collapses healthy panels to just the summary bar so a wall TV
+  // can show every namespace at a glance and the eye is drawn to the one
+  // panel that's actually broken. On /tv this is the whole point — default
+  // it on. Interactive web sessions default off (browsing behaviour), but
+  // the toolbar button still toggles it either way.
+  let focusMode          = TV_MODE;
+  if (TV_MODE) document.querySelector('.app').classList.add('focus');
 
   // previous service-status snapshot, for deriving ticker events from real diffs
   let prevStatusMap = null;
