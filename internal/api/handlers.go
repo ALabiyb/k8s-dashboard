@@ -28,6 +28,12 @@ import (
 	"github.com/ALabiyb/k8s-dashboard/internal/k8s"
 )
 
+const (
+	hdrContentType  = "Content-Type"
+	hdrCacheControl = "Cache-Control"
+	mimeJSON        = "application/json"
+)
+
 // handleSummary serves the current health summary as JSON, filtered by the
 // caller's Keycloak groups so users only see namespaces their K8s RBAC
 // allows.
@@ -57,11 +63,11 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		summary = filterSummaryForUser(summary, claims.Groups, s.oidcAdminGroup)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(hdrContentType, mimeJSON)
 	// Short client-side cache: smooths out bursts of near-simultaneous
 	// requests (e.g. several browser tabs polling) without serving data
 	// that's meaningfully stale relative to the 30s poll_interval.
-	w.Header().Set("Cache-Control", "max-age=15")
+	w.Header().Set(hdrCacheControl, "max-age=15")
 	if err := json.NewEncoder(w).Encode(summary); err != nil {
 		http.Error(w, "failed to encode response", http.StatusInternalServerError)
 	}
@@ -99,8 +105,8 @@ func filterSummaryForUser(full aggregator.Summary, userGroups []string, adminGro
 
 // handleMode tells the frontend whether we're in mock or real mode.
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"mock": s.mockMode})
+	w.Header().Set(hdrContentType, mimeJSON)
+	_ = json.NewEncoder(w).Encode(map[string]bool{"mock": s.mockMode})
 }
 
 // handleMe returns the authenticated user's username, role, and (for OIDC
@@ -116,8 +122,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	if groups == nil {
 		groups = []string{} // encode as [], not null
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	w.Header().Set(hdrContentType, mimeJSON)
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"username": claims.Username,
 		"role":     claims.Role,
 		"groups":   groups,
@@ -126,8 +132,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 // handleIndex serves the single-page HTML dashboard with APP_ENV substituted.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(s.indexHTML)
+	w.Header().Set(hdrContentType, "text/html; charset=utf-8")
+	_, _ = w.Write(s.indexHTML)
 }
 
 // handleTVMe returns a fixed kiosk identity for the no-auth TV mode. The
@@ -135,7 +141,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 // affordances — never as a security check (the real check is which endpoints
 // the kiosk path is allowed to hit, which is enforced server-side).
 func (s *Server) handleTVMe(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(hdrContentType, mimeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"username": "tv",
 		"role":     "viewer",
@@ -151,14 +157,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 
 	switch r.URL.Query().Get("format") {
 	case "csv":
-		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set(hdrContentType, "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="k8s-health.csv"`)
 		cw := csv.NewWriter(w)
-		cw.Write([]string{"namespace", "health", "score_pct", "healthy", "total",
+		_ = cw.Write([]string{"namespace", "health", "score_pct", "healthy", "total",
 			"service", "kind", "status", "reason", "ready", "desired"})
 		for _, p := range summary.Products {
 			for _, svc := range p.Services {
-				cw.Write([]string{
+				_ = cw.Write([]string{
 					p.Namespace, string(p.Health),
 					fmt.Sprintf("%d", p.ScorePercent),
 					fmt.Sprintf("%d", p.HealthyCount),
@@ -170,12 +176,15 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		cw.Flush()
+		if err := cw.Error(); err != nil {
+			slog.WarnContext(r.Context(), "csv export write error", "component", "api", "error", err)
+		}
 	default:
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(hdrContentType, mimeJSON)
 		w.Header().Set("Content-Disposition", `attachment; filename="k8s-health.json"`)
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		enc.Encode(summary)
+		_ = enc.Encode(summary)
 	}
 }
 
@@ -194,67 +203,19 @@ func (s *Server) handlePodList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "namespace and owner required", http.StatusBadRequest)
 		return
 	}
-	if s.mockMode {
-		http.Error(w, "pod listing unavailable in mock mode", http.StatusServiceUnavailable)
-		return
-	}
-	if s.oidc == nil {
-		http.Error(w, "requires OIDC session", http.StatusForbidden)
-		return
-	}
-	sessionID := auth.SessionIDFrom(r)
-	if sessionID == "" {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
-		return
-	}
-	token, err := s.oidc.ValidAccessToken(r.Context(), sessionID)
+	cs, err := s.userK8sClient(r)
 	if err != nil {
-		switch {
-		case errors.Is(err, auth.ErrNoOIDCSession):
-			http.Error(w, "not an OIDC session", http.StatusForbidden)
-		case errors.Is(err, auth.ErrRefreshFailed):
-			http.Error(w, "session expired", http.StatusUnauthorized)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if errors.Is(err, errMockMode) {
+			http.Error(w, "pod listing unavailable in mock mode", http.StatusServiceUnavailable)
+		} else {
+			writeAuthError(w, err)
 		}
 		return
 	}
-	cs, err := k8s.ForUser(token)
+	pods, err := listPodsForOwner(r.Context(), cs, ns, owner)
 	if err != nil {
-		http.Error(w, "cannot build k8s client: "+err.Error(), http.StatusInternalServerError)
+		writeK8sError(w, err, ns, owner)
 		return
-	}
-
-	// Lookup strategy: label-based first (fast, common), then owner-reference
-	// walk (robust — works even when label value != workload name, e.g. Rook
-	// Ceph OSDs use app=rook-ceph-osd + rook-ceph-osd-id=<n>).
-	var pods []corev1.Pod
-	for _, key := range []string{"app.kubernetes.io/name", "app", "name"} {
-		list, err := cs.CoreV1().Pods(ns).List(r.Context(), metaListOpts(key+"="+owner))
-		if err != nil {
-			writeK8sError(w, err, ns, owner)
-			return
-		}
-		if len(list.Items) > 0 {
-			pods = list.Items
-			break
-		}
-	}
-	if len(pods) == 0 {
-		// Fallback: list all pods in the namespace, walk their ownerReferences
-		// up one hop (ReplicaSet or the workload itself). If any ref resolves
-		// to the requested owner name, include the pod. Handles Deployments
-		// (Pod → ReplicaSet → Deployment) and StatefulSets/DaemonSets directly.
-		all, err := cs.CoreV1().Pods(ns).List(r.Context(), metav1.ListOptions{})
-		if err != nil {
-			writeK8sError(w, err, ns, owner)
-			return
-		}
-		for _, p := range all.Items {
-			if podOwnedBy(r.Context(), cs, ns, p, owner) {
-				pods = append(pods, p)
-			}
-		}
 	}
 
 	type podLite struct {
@@ -274,9 +235,36 @@ func (s *Server) handlePodList(w http.ResponseWriter, r *http.Request) {
 			Containers: names,
 		})
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(hdrContentType, mimeJSON)
+	w.Header().Set(hdrCacheControl, "no-store")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// listPodsForOwner finds pods in ns belonging to owner. It first tries
+// label-based lookup (fast, common case), then falls back to walking
+// ownerReferences (robust — handles Rook Ceph OSDs, custom controllers, etc.).
+func listPodsForOwner(ctx context.Context, cs kubernetes.Interface, ns, owner string) ([]corev1.Pod, error) {
+	for _, key := range []string{"app.kubernetes.io/name", "app", "name"} {
+		list, err := cs.CoreV1().Pods(ns).List(ctx, metaListOpts(key+"="+owner))
+		if err != nil {
+			return nil, err
+		}
+		if len(list.Items) > 0 {
+			return list.Items, nil
+		}
+	}
+	// Fallback: list all pods and walk ownerReferences up one hop.
+	all, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var pods []corev1.Pod
+	for _, p := range all.Items {
+		if podOwnedBy(ctx, cs, ns, p, owner) {
+			pods = append(pods, p)
+		}
+	}
+	return pods, nil
 }
 
 // podOwnedBy returns true if the pod's ownership chain resolves to a workload
@@ -349,7 +337,7 @@ func (s *Server) handleRestartWorkload(w http.ResponseWriter, r *http.Request) {
 	if s.mockMode {
 		slog.Info("mock: simulated restart", "component", "api",
 			"user", claimsUsername(r), "ns", ns, "kind", kind, "name", name)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(hdrContentType, mimeJSON)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":          true,
 			"mock":        true,
@@ -396,14 +384,14 @@ func (s *Server) handleRestartWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("workload restarted", "component", "api",
-		"user", auth.GetClaims(r).Username, "ns", ns, "kind", kind, "name", name)
+		"user", claimsUsername(r), "ns", ns, "kind", kind, "name", name)
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(hdrContentType, mimeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":         true,
-		"kind":       kind,
-		"name":       name,
-		"namespace":  ns,
+		"ok":          true,
+		"kind":        kind,
+		"name":        name,
+		"namespace":   ns,
 		"restartedAt": time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -428,7 +416,7 @@ func (s *Server) handleDeletePod(w http.ResponseWriter, r *http.Request) {
 	if s.mockMode {
 		slog.Info("mock: simulated pod delete", "component", "api",
 			"user", claimsUsername(r), "ns", ns, "pod", name)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(hdrContentType, mimeJSON)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":        true,
 			"mock":      true,
@@ -458,10 +446,10 @@ func (s *Server) handleDeletePod(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("pod deleted", "component", "api",
-		"user", auth.GetClaims(r).Username, "ns", ns, "pod", name,
+		"user", claimsUsername(r), "ns", ns, "pod", name,
 		"force", r.URL.Query().Get("force") == "true")
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(hdrContentType, mimeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":        true,
 		"deleted":   name,
@@ -539,51 +527,38 @@ func (s *Server) handlePodLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "namespace and pod name required", http.StatusBadRequest)
 		return
 	}
-
-	// Mock mode has no real cluster to hit. Explicit refusal beats a
-	// confusing timeout/connection-error later.
-	if s.mockMode {
-		http.Error(w, "log streaming unavailable in mock mode", http.StatusServiceUnavailable)
-		return
-	}
-
-	// OIDC handler is required — logs are gated by RBAC which needs the
-	// user's token. Local username/password sessions have no token and
-	// cannot view logs; return 403 with an explanatory message.
-	if s.oidc == nil {
-		http.Error(w, "log streaming requires OIDC authentication (not available for local sessions)", http.StatusForbidden)
-		return
-	}
-	sessionID := auth.SessionIDFrom(r)
-	if sessionID == "" {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
-		return
-	}
-
-	// Get a valid access token (auto-refresh if the stored one is stale).
-	// If refresh fails the user must re-login through the browser.
-	token, err := s.oidc.ValidAccessToken(r.Context(), sessionID)
+	cs, err := s.userK8sClient(r)
 	if err != nil {
 		switch {
-		case errors.Is(err, auth.ErrNoOIDCSession):
-			http.Error(w, "not an OIDC session; sign in via Keycloak", http.StatusForbidden)
-		case errors.Is(err, auth.ErrRefreshFailed):
-			http.Error(w, "session expired; sign in again", http.StatusUnauthorized)
+		case errors.Is(err, errMockMode):
+			http.Error(w, "log streaming unavailable in mock mode", http.StatusServiceUnavailable)
+		case errors.Is(err, errNoOIDC):
+			http.Error(w, "log streaming requires OIDC authentication (not available for local sessions)", http.StatusForbidden)
 		default:
-			http.Error(w, "token error: "+err.Error(), http.StatusInternalServerError)
+			writeAuthError(w, err)
 		}
 		return
 	}
 
-	// Build a per-request K8s clientset that authenticates AS the user.
-	// RBAC decisions from here on are made by kube-apiserver.
-	cs, err := k8s.ForUser(token)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	stream, err := cs.CoreV1().Pods(ns).GetLogs(name, parsePodLogOpts(r)).Stream(ctx)
 	if err != nil {
-		http.Error(w, "cannot build k8s client: "+err.Error(), http.StatusInternalServerError)
+		writeK8sError(w, err, ns, name)
 		return
 	}
+	defer stream.Close()
 
-	// Assemble log options from the query string.
+	w.Header().Set(hdrContentType, "text/plain; charset=utf-8")
+	w.Header().Set(hdrCacheControl, "no-store")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering if fronted by one
+	w.WriteHeader(http.StatusOK)
+	copyLogStream(ctx, w, stream, ns, name)
+}
+
+// parsePodLogOpts builds PodLogOptions from the request query string.
+func parsePodLogOpts(r *http.Request) *corev1.PodLogOptions {
 	q := r.URL.Query()
 	tail := int64(200)
 	if v := q.Get("tail"); v != "" {
@@ -591,39 +566,21 @@ func (s *Server) handlePodLogs(w http.ResponseWriter, r *http.Request) {
 			tail = n
 		}
 	}
-	follow := q.Get("follow") == "true" || q.Get("follow") == "1"
-	previous := q.Get("previous") == "true" || q.Get("previous") == "1"
-
 	opts := &corev1.PodLogOptions{
 		Container: q.Get("container"),
-		Follow:    follow,
-		Previous:  previous,
+		Follow:    q.Get("follow") == "true" || q.Get("follow") == "1",
+		Previous:  q.Get("previous") == "true" || q.Get("previous") == "1",
 	}
 	if tail > 0 {
 		opts.TailLines = &tail
 	}
+	return opts
+}
 
-	// Follow=true streams may run for minutes. Cancel the request context
-	// as soon as the client disconnects so we don't leak the goroutine
-	// blocking on Read.
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	req := cs.CoreV1().Pods(ns).GetLogs(name, opts)
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		writeK8sError(w, err, ns, name)
-		return
-	}
-	defer stream.Close()
-
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering if fronted by one
-	w.WriteHeader(http.StatusOK)
-
-	// Flush after every read so the browser sees log lines as they arrive
-	// (not batched into a single big response at the end).
+// copyLogStream reads from stream and writes to w, flushing after each chunk
+// so the browser sees log lines as they arrive. Returns when the stream ends
+// or the client disconnects.
+func copyLogStream(ctx context.Context, w http.ResponseWriter, stream io.ReadCloser, ns, name string) {
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {

@@ -24,8 +24,9 @@ WORKDIR /app
 COPY --from=builder /app/k8s-dashboard .
 COPY --from=builder /app/config/config.yaml ./config/config.yaml
 COPY --from=builder /app/web/ ./web/
+COPY entrypoint.sh ./entrypoint.sh
 
-RUN chown -R appuser:appgroup /app
+RUN chmod +x /app/entrypoint.sh && chown -R appuser:appgroup /app
 
 USER appuser
 
@@ -34,4 +35,4 @@ EXPOSE 8090
 # MOCK_MODE=true → use fake data (no kubeconfig needed)
 ENV MOCK_MODE=true
 
-ENTRYPOINT sh -c 'FLAGS=""; [ "$MOCK_MODE" = "true" ] && FLAGS="-mock"; exec /app/k8s-dashboard $FLAGS -config /app/config/config.yaml'
+ENTRYPOINT ["/app/entrypoint.sh"]

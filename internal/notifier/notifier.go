@@ -52,11 +52,7 @@ func (n *Notifier) CheckAndNotify(summary aggregator.Summary) {
 	}
 
 	for _, product := range summary.Products {
-		// Only alert on state changes (or always, depending on config)
 		if n.cfg.OnStateChangeOnly && !aggregator.StateChanged(product) {
-			continue
-		}
-		if !aggregator.StateChanged(product) {
 			continue
 		}
 

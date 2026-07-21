@@ -31,7 +31,7 @@ type serverMetrics struct {
 // which wouldn't fix anything if the problem is the cluster, not this app.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok\n"))
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 // handleReadyz is the readiness probe: "has the first poll completed, so
@@ -49,7 +49,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ready\n"))
+	_, _ = w.Write([]byte("ready\n"))
 }
 
 // handleMetrics exposes operational counters in Prometheus text exposition
@@ -72,7 +72,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
 	metric := func(name, help, typ string, value float64) {
-		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %g\n", name, help, name, typ, name, value)
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %g\n", name, help, name, typ, name, value)
 	}
 
 	metric("dashboard_mock_mode", "1 if running against fake/mock data instead of a real cluster, else 0.", "gauge", mode)

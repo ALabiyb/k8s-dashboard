@@ -34,6 +34,8 @@ const (
 
 	RoleAdmin  = "admin"
 	RoleViewer = "viewer"
+
+	loginPath = "/login"
 )
 
 // User is a dashboard account.
@@ -120,7 +122,7 @@ func Middleware(next http.Handler, store *SessionStore) http.Handler {
 		// None of these expose cluster data — see metrics.go for what /metrics
 		// actually returns (operational counters only, no namespace/pod detail),
 		// and handleMode (handlers.go) for /api/mode (just a {"mock": bool} flag).
-		if p == "/login" || p == "/logout" || p == "/embed" || p == "/healthz" || p == "/readyz" || p == "/metrics" || p == "/api/mode" || p == "/auth/login" || p == "/auth/callback" {
+		if p == loginPath || p == "/logout" || p == "/embed" || p == "/healthz" || p == "/readyz" || p == "/metrics" || p == "/api/mode" || p == "/auth/login" || p == "/auth/callback" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -133,7 +135,7 @@ func Middleware(next http.Handler, store *SessionStore) http.Handler {
 		}
 		cookie, err := r.Cookie(cookieName)
 		if err != nil || cookie.Value == "" {
-			http.Redirect(w, r, "/login", http.StatusFound)
+			http.Redirect(w, r, loginPath, http.StatusFound)
 			return
 		}
 		sess := store.Get(cookie.Value)
@@ -142,7 +144,7 @@ func Middleware(next http.Handler, store *SessionStore) http.Handler {
 			// restarted and lost all sessions). Clear the stale cookie so
 			// the browser doesn't keep resending it on every request.
 			clearSession(w)
-			http.Redirect(w, r, "/login", http.StatusFound)
+			http.Redirect(w, r, loginPath, http.StatusFound)
 			return
 		}
 		claims := &Claims{Username: sess.Username, Role: sess.Role, Groups: sess.Groups}
@@ -212,7 +214,7 @@ func HandleLogin(users []User, store *SessionStore) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write(loginHTML)
+			_, _ = w.Write(loginHTML)
 		case http.MethodPost:
 			ip := clientIP(r)
 			if err := r.ParseForm(); err != nil {
@@ -256,23 +258,18 @@ func HandleLogin(users []User, store *SessionStore) http.HandlerFunc {
 }
 
 // HandleEmbed validates a static embed token and issues a viewer session cookie
-// with SameSite=None so cross-site iframes (e.g. a TV wall display) can carry
-// it on subsequent requests. The token must be set via the EMBED_TOKEN env var;
-// if embedToken is empty, the handler returns 404.
+// so cross-origin iframes (e.g. a TV wall display) can stay authenticated.
 //
 // Usage: point an iframe at /embed?token=<EMBED_TOKEN>. The handler sets the
-// session cookie and redirects to / — the iframe then behaves like a logged-in
-// viewer for the lifetime of the session.
-// HandleEmbed validates a static embed token and issues a viewer session cookie
-// so cross-origin iframes (e.g. a TV wall display) can stay authenticated.
+// session cookie and redirects to /. If embedToken is empty, returns 404.
 //
 // Cookie strategy depends on how the request arrives:
 //   - HTTPS (through Istio/gateway, X-Forwarded-Proto: https): SameSite=None + Secure
 //     — required for cross-domain iframe embedding
 //   - HTTP (NodePort direct access from TV, no TLS): SameSite=Lax, no Secure
 //     — works because the TV page and this service share the same host IP,
-//       making them "same-site" even on different ports; Secure would silently
-//       drop the cookie over plain HTTP
+//     making them "same-site" even on different ports; Secure would silently
+//     drop the cookie over plain HTTP
 func HandleEmbed(embedToken string, store *SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if embedToken == "" {
@@ -319,7 +316,7 @@ func HandleLogout(store *SessionStore) http.HandlerFunc {
 			}
 		}
 		clearSession(w)
-		http.Redirect(w, r, "/login", http.StatusFound)
+		http.Redirect(w, r, loginPath, http.StatusFound)
 	}
 }
 
