@@ -35,7 +35,8 @@ const (
 	RoleAdmin  = "admin"
 	RoleViewer = "viewer"
 
-	loginPath = "/login"
+	loginPath    = "/login"
+	loginErrPath = "/login?error=1"
 )
 
 // User is a dashboard account.
@@ -218,7 +219,7 @@ func HandleLogin(users []User, store *SessionStore) http.HandlerFunc {
 		case http.MethodPost:
 			ip := clientIP(r)
 			if err := r.ParseForm(); err != nil {
-				http.Redirect(w, r, "/login?error=1", http.StatusFound)
+				http.Redirect(w, r, loginErrPath, http.StatusFound)
 				return
 			}
 			username := r.FormValue("username")
@@ -231,7 +232,7 @@ func HandleLogin(users []User, store *SessionStore) http.HandlerFunc {
 				loginFailureTotal.Add(1)
 				slog.Warn("login failed", "component", "auth", "event", "login_failure",
 					"username_attempted", username, "remote_addr", ip)
-				http.Redirect(w, r, "/login?error=1", http.StatusFound)
+				http.Redirect(w, r, loginErrPath, http.StatusFound)
 				return
 			}
 			loginSuccessTotal.Add(1)

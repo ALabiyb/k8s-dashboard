@@ -166,125 +166,130 @@ func (h *OIDCHandler) LoginHandler() http.HandlerFunc {
 	}
 }
 
-// CallbackHandler processes the redirect back from Keycloak:
+// CallbackHandler processes the redirect back from Keycloak.
+// Registered at GET /auth/callback (public — in the auth.Middleware bypass list).
+func (h *OIDCHandler) CallbackHandler() http.HandlerFunc {
+	return h.handleOIDCCallback
+}
+
+// handleOIDCCallback is the named implementation behind CallbackHandler.
+// Extracting it from the closure removes the nesting penalty on cognitive
+// complexity and makes the steps easier to test in isolation.
+//
 //  1. verifies the state cookie (CSRF protection)
 //  2. exchanges the authorization code for tokens
 //  3. verifies the ID token signature, expiry, audience, and nonce
 //  4. extracts the Keycloak realm roles and maps them to admin/viewer
-//  5. mints the existing k8s_session cookie so the rest of the app is unchanged
-//
-// Registered at GET /auth/callback (public — in the auth.Middleware bypass list).
-func (h *OIDCHandler) CallbackHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// ── 1. Verify state (anti-CSRF) ──────────────────────────────────────
-		stateCookie, err := r.Cookie("oidc_state")
-		if err != nil || r.URL.Query().Get("state") != stateCookie.Value {
-			slog.Warn("oidc: state mismatch — possible CSRF attempt", "component", "auth")
-			http.Redirect(w, r, "/login?error=1", http.StatusFound)
-			return
-		}
-		nonceCookie, err := r.Cookie("oidc_nonce")
-		if err != nil {
-			http.Redirect(w, r, "/login?error=1", http.StatusFound)
-			return
-		}
-
-		// ── 2. Exchange code for tokens ───────────────────────────────────────
-		// Inject the custom HTTP client (same TLS config used at init time) so
-		// the token-exchange request uses the same trust settings.
-		ctx := gooidc.ClientContext(r.Context(), h.httpClient)
-		oauth2Token, err := h.oauth2.Exchange(ctx, r.URL.Query().Get("code"))
-		if err != nil {
-			slog.Error("oidc: code exchange failed", "component", "auth", "error", err)
-			http.Redirect(w, r, "/login?error=1", http.StatusFound)
-			return
-		}
-		rawIDToken, ok := oauth2Token.Extra("id_token").(string)
-		if !ok {
-			slog.Error("oidc: no id_token in token response", "component", "auth")
-			http.Redirect(w, r, "/login?error=1", http.StatusFound)
-			return
-		}
-
-		// ── 3. Verify ID token ────────────────────────────────────────────────
-		idToken, err := h.verifier.Verify(ctx, rawIDToken)
-		if err != nil {
-			slog.Error("oidc: id_token verification failed", "component", "auth", "error", err)
-			http.Redirect(w, r, "/login?error=1", http.StatusFound)
-			return
-		}
-
-		// ── 4. Extract claims ─────────────────────────────────────────────────
-		// We read `groups` (populated by the Keycloak Group Membership mapper
-		// on the k8s-dashboard client, with "Full group path" OFF so entries
-		// are plain names like "k8s-cluster-admins", not "/k8s-cluster-admins").
-		var claims struct {
-			Nonce             string   `json:"nonce"`
-			PreferredUsername string   `json:"preferred_username"`
-			Groups            []string `json:"groups"`
-		}
-		if err := idToken.Claims(&claims); err != nil {
-			slog.Error("oidc: cannot parse id_token claims", "component", "auth", "error", err)
-			http.Redirect(w, r, "/login?error=1", http.StatusFound)
-			return
-		}
-		if claims.Nonce != nonceCookie.Value {
-			slog.Warn("oidc: nonce mismatch", "component", "auth")
-			http.Redirect(w, r, "/login?error=1", http.StatusFound)
-			return
-		}
-
-		// ── 5. Map Keycloak groups → dashboard role ───────────────────────────
-		// If groups aren't in the ID token (mapper not configured with "Add to
-		// ID token"), fall back to decoding the access token — same trust
-		// argument as the previous realm_roles fallback: the access token was
-		// received directly from Keycloak's token endpoint over TLS.
-		groups := claims.Groups
-		if len(groups) == 0 {
-			groups = groupsFromAccessToken(oauth2Token.AccessToken)
-		}
-		slog.Debug("oidc: resolved groups", "component", "auth",
-			"username", claims.PreferredUsername, "groups", groups)
-
-		role := roleFromGroups(groups, h.cfg.AdminGroup)
-		if role == "" {
-			slog.Warn("oidc: user authenticated but has no k8s-* group assigned",
-				"component", "auth",
-				"username", claims.PreferredUsername,
-				"groups", groups,
-				"expected_admin_group", h.cfg.AdminGroup,
-			)
-			http.Redirect(w, r, "/login?error=access_denied", http.StatusFound)
-			return
-		}
-
-		// ── 6. Mint session (server-side; cookie holds only the opaque ID) ────
-		// Store the OIDC access + refresh tokens so K8s-facing handlers can
-		// forward the user's identity to the API server. The refresh token
-		// stays in the store (never sent to the browser).
-		slog.Info("oidc login succeeded", "component", "auth", "event", "oidc_login_success",
-			"username", claims.PreferredUsername, "role", role, "groups", groups)
-		loginSuccessTotal.Add(1)
-
-		sessionID := h.store.Create(&Session{
-			Username:     claims.PreferredUsername,
-			Role:         role,
-			Groups:       groups,
-			AccessToken:  oauth2Token.AccessToken,
-			RefreshToken: oauth2Token.RefreshToken,
-			TokenExpiry:  oauth2Token.Expiry,
-			ExpiresAt:    time.Now().Add(sessionDuration),
-		})
-		http.SetCookie(w, &http.Cookie{
-			Name:     cookieName,
-			Value:    sessionID,
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   int(sessionDuration.Seconds()),
-		})
-		http.Redirect(w, r, "/", http.StatusFound)
+//  5. mints the k8s_session cookie so the rest of the app is unchanged
+func (h *OIDCHandler) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
+	// ── 1. Verify state (anti-CSRF) ──────────────────────────────────────
+	stateCookie, err := r.Cookie("oidc_state")
+	if err != nil || r.URL.Query().Get("state") != stateCookie.Value {
+		slog.Warn("oidc: state mismatch — possible CSRF attempt", "component", "auth")
+		http.Redirect(w, r, loginErrPath, http.StatusFound)
+		return
 	}
+	nonceCookie, err := r.Cookie("oidc_nonce")
+	if err != nil {
+		http.Redirect(w, r, loginErrPath, http.StatusFound)
+		return
+	}
+
+	// ── 2. Exchange code for tokens ───────────────────────────────────────
+	// Inject the custom HTTP client (same TLS config used at init time) so
+	// the token-exchange request uses the same trust settings.
+	ctx := gooidc.ClientContext(r.Context(), h.httpClient)
+	oauth2Token, err := h.oauth2.Exchange(ctx, r.URL.Query().Get("code"))
+	if err != nil {
+		slog.Error("oidc: code exchange failed", "component", "auth", "error", err)
+		http.Redirect(w, r, loginErrPath, http.StatusFound)
+		return
+	}
+	rawIDToken, ok := oauth2Token.Extra("id_token").(string)
+	if !ok {
+		slog.Error("oidc: no id_token in token response", "component", "auth")
+		http.Redirect(w, r, loginErrPath, http.StatusFound)
+		return
+	}
+
+	// ── 3. Verify ID token ────────────────────────────────────────────────
+	idToken, err := h.verifier.Verify(ctx, rawIDToken)
+	if err != nil {
+		slog.Error("oidc: id_token verification failed", "component", "auth", "error", err)
+		http.Redirect(w, r, loginErrPath, http.StatusFound)
+		return
+	}
+
+	// ── 4. Extract claims ─────────────────────────────────────────────────
+	// We read `groups` (populated by the Keycloak Group Membership mapper
+	// on the k8s-dashboard client, with "Full group path" OFF so entries
+	// are plain names like "k8s-cluster-admins", not "/k8s-cluster-admins").
+	var claims struct {
+		Nonce             string   `json:"nonce"`
+		PreferredUsername string   `json:"preferred_username"`
+		Groups            []string `json:"groups"`
+	}
+	if err := idToken.Claims(&claims); err != nil {
+		slog.Error("oidc: cannot parse id_token claims", "component", "auth", "error", err)
+		http.Redirect(w, r, loginErrPath, http.StatusFound)
+		return
+	}
+	if claims.Nonce != nonceCookie.Value {
+		slog.Warn("oidc: nonce mismatch", "component", "auth")
+		http.Redirect(w, r, loginErrPath, http.StatusFound)
+		return
+	}
+
+	// ── 5. Map Keycloak groups → dashboard role ───────────────────────────
+	// If groups aren't in the ID token (mapper not configured with "Add to
+	// ID token"), fall back to decoding the access token — same trust
+	// argument as the previous realm_roles fallback: the access token was
+	// received directly from Keycloak's token endpoint over TLS.
+	groups := claims.Groups
+	if len(groups) == 0 {
+		groups = groupsFromAccessToken(oauth2Token.AccessToken)
+	}
+	slog.Debug("oidc: resolved groups", "component", "auth",
+		"username", claims.PreferredUsername, "groups", groups)
+
+	role := roleFromGroups(groups, h.cfg.AdminGroup)
+	if role == "" {
+		slog.Warn("oidc: user authenticated but has no k8s-* group assigned",
+			"component", "auth",
+			"username", claims.PreferredUsername,
+			"groups", groups,
+			"expected_admin_group", h.cfg.AdminGroup,
+		)
+		http.Redirect(w, r, "/login?error=access_denied", http.StatusFound)
+		return
+	}
+
+	// ── 6. Mint session (server-side; cookie holds only the opaque ID) ────
+	// Store the OIDC access + refresh tokens so K8s-facing handlers can
+	// forward the user's identity to the API server. The refresh token
+	// stays in the store (never sent to the browser).
+	slog.Info("oidc login succeeded", "component", "auth", "event", "oidc_login_success",
+		"username", claims.PreferredUsername, "role", role, "groups", groups)
+	loginSuccessTotal.Add(1)
+
+	sessionID := h.store.Create(&Session{
+		Username:     claims.PreferredUsername,
+		Role:         role,
+		Groups:       groups,
+		AccessToken:  oauth2Token.AccessToken,
+		RefreshToken: oauth2Token.RefreshToken,
+		TokenExpiry:  oauth2Token.Expiry,
+		ExpiresAt:    time.Now().Add(sessionDuration),
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(sessionDuration.Seconds()),
+	})
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 // shortCookie returns a short-lived HttpOnly cookie for OIDC state/nonce.
